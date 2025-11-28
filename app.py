@@ -23,42 +23,40 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.header("Dimensões")
-    width = st.number_input("Largura (Units)", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
-    depth = st.number_input("Profundidade (Units)", min_value=1.0, max_value=10.0, value=1.0, step=1.0)
-    height = st.number_input("Altura (Units)", min_value=2, max_value=20, value=3, step=1)
+    gridx = st.number_input("Largura (Grid X)", min_value=1, max_value=10, value=2, step=1)
+    gridy = st.number_input("Profundidade (Grid Y)", min_value=1, max_value=10, value=1, step=1)
+    gridz = st.number_input("Altura (Grid Z - 7mm units)", min_value=2, max_value=20, value=6, step=1)
 
 with col2:
     st.header("Opções")
-    chambers = st.number_input("Divisórias (X)", 1, 10, 1)
-    with_label = st.checkbox("Incluir Aba de Etiqueta (Label)", value=False)
-    fingerslide = st.checkbox("Arredondamento Interno (Fingerslide)", value=True)
-    holes = st.checkbox("Furos para Ímãs", value=True)
-
-# Lógica dos parâmetros booleanos para o OpenSCAD
-label_val = "true" if with_label else "disabled"
-fingerslide_val = "true" if fingerslide else "false"
-magnet_val = "6.5" if holes else "0"  # 6.5mm é o padrão, 0 remove
+    divx = st.number_input("Divisórias em X", 0, 10, 1)
+    divy = st.number_input("Divisórias em Y", 0, 10, 1)
+    scoop = st.slider("Scoop (arredondamento)", 0.0, 1.0, 1.0, 0.1)
+    magnet_holes = st.checkbox("Furos para Ímãs", value=False)
+    screw_holes = st.checkbox("Furos para Parafusos", value=False)
 
 # =========================================================
 # BACKEND (O Wrapper)
 # =========================================================
 if st.button("🚀 Gerar STL", type="primary"):
     
-    output_filename = f"gridfinity_{width}x{depth}x{height}_div{chambers}.stl"
+    output_filename = f"gridfinity_{gridx}x{gridy}x{gridz}_div{divx}x{divy}.stl"
     
     # Montando o comando do terminal
     # -D define variáveis dentro do script .scad antes de rodar
     cmd = [
         CAMINHO_OPENSCAD,
         "-o", output_filename,
-        "gridfinity_basic_cup.scad",  # O arquivo alvo
-        "-D", f"width={width}",
-        "-D", f"depth={depth}",
-        "-D", f"height={height}",
-        "-D", f"chambers={chambers}",
-        "-D", f"withLabel=\"{label_val}\"",  # Aspas escapadas para strings
-        "-D", f"fingerslide={fingerslide_val}",
-        "-D", f"magnet_diameter={magnet_val}"
+        "gridfinity_basic_cup.scad",
+        "-D", f"gridx={gridx}",
+        "-D", f"gridy={gridy}",
+        "-D", f"gridz={gridz}",
+        "-D", f"divx={divx}",
+        "-D", f"divy={divy}",
+        "-D", f"scoop={scoop}",
+        "-D", f"magnet_holes={str(magnet_holes).lower()}",
+        "-D", f"screw_holes={str(screw_holes).lower()}",
+        "-D", "refined_holes=false"  # Desabilita refined_holes quando magnet_holes está ativo
     ]
 
     status_text = st.empty()
