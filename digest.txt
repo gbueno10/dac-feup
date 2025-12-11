@@ -1,0 +1,1563 @@
+Directory structure:
+└── dac-python-build123d/
+    ├── README.md
+    ├── app.py
+    ├── docker-compose.yml
+    ├── Dockerfile
+    ├── pyproject.toml
+    ├── requirements.txt
+    ├── run.bat
+    ├── run.sh
+    ├── gridfinity/
+    │   ├── __init__.py
+    │   ├── baseplate.py
+    │   ├── bins.py
+    │   ├── constants.py
+    │   └── export_utils.py
+    ├── tests/
+    │   ├── __init__.py
+    │   ├── conftest.py
+    │   ├── test_baseplate.py
+    │   ├── test_bins.py
+    │   └── test_constants.py
+    └── .streamlit/
+        └── config.toml
+
+================================================
+FILE: README.md
+================================================
+# Gridfinity Generator Web App
+
+Ferramenta web para gerar arquivos Gridfinity baseados nas medidas reais de uma gaveta, otimizado para Bambu Lab A1 Mini.
+
+## Funcionalidades
+
+- **Smart Tiling**: Divide automaticamente baseplates grandes em peças que cabem na A1 Mini (max 4x4 unidades)
+- **Geração de Bins**: Crie caixas Gridfinity personalizadas
+- **Validação Automática**: Alertas de incompatibilidade para peças muito grandes
+- **Download Unificado**: Arquivo ZIP com todas as peças
+
+## Instalação
+
+```bash
+# Criar ambiente virtual
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# ou
+venv\Scripts\activate  # Windows
+
+# Instalar dependências
+pip install -r requirements.txt
+```
+
+## Execução
+
+```bash
+streamlit run app.py
+```
+
+## Hardware Alvo
+
+- **Bambu Lab A1 Mini**: Volume 180x180x180mm
+- Limite seguro: 4x4 unidades (168mm)
+
+## Especificações Gridfinity
+
+- Unidade base: 42mm x 42mm
+- Altura da unidade: 7mm
+
+
+
+================================================
+FILE: app.py
+================================================
+"""
+Gridfinity Generator Web App
+Otimizado para Bambu Lab A1 Mini
+
+Aplicação Streamlit para gerar arquivos Gridfinity personalizados
+com suporte a Smart Tiling para impressoras pequenas.
+"""
+
+import streamlit as st
+import tempfile
+import os
+from typing import List, Tuple
+
+# Tenta importar build123d - pode falhar se não instalado
+try:
+    from build123d import Compound, Part, export_stl
+    from gridfinity import BasePlateGenerator, BinGenerator
+    from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT
+    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str
+    BUILD123D_AVAILABLE = True
+except ImportError as e:
+    BUILD123D_AVAILABLE = False
+    IMPORT_ERROR = str(e)
+
+
+# Configuração da página
+st.set_page_config(
+    page_title="Gridfinity Generator",
+    page_icon="🗃️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# CSS personalizado
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        font-size: 1.1rem;
+        color: #666;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .info-box {
+        background-color: #e7f3ff;
+        border-left: 4px solid #1f77b4;
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 1rem 0;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 1rem 0;
+    }
+    .success-box {
+        background-color: #d4edda;
+        border-left: 4px solid #28a745;
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 1rem 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border-left: 4px solid #dc3545;
+        padding: 1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 1rem 0;
+    }
+    .stButton>button {
+        width: 100%;
+        background-color: #1f77b4;
+        color: white;
+        font-weight: bold;
+    }
+    .stButton>button:hover {
+        background-color: #155a8a;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+def main():
+    """Função principal da aplicação."""
+    
+    # Header
+    st.markdown('<div class="main-header">🗃️ Gridfinity Generator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Gere baseplates e bins Gridfinity personalizados para sua gaveta</div>', unsafe_allow_html=True)
+    
+    # Verificação de dependências
+    if not BUILD123D_AVAILABLE:
+        st.error(f"""
+        ⚠️ **Dependências não instaladas**
+        
+        O módulo `build123d` não foi encontrado. Execute o seguinte comando para instalar:
+        
+        ```bash
+        pip install -r requirements.txt
+        ```
+        
+        Erro: {IMPORT_ERROR}
+        """)
+        return
+    
+    # Sidebar - Configurações
+    with st.sidebar:
+        st.header("⚙️ Configurações")
+        
+        # Toggle para A1 Mini
+        optimize_a1_mini = st.checkbox(
+            "🖨️ Otimizar para Bambu Lab A1 Mini (Max 180mm)",
+            value=True,
+            help="Se marcado, divide automaticamente baseplates maiores que 4x4 unidades"
+        )
+        
+        if optimize_a1_mini:
+            st.info(f"**Limite ativo:** Máximo {A1_MINI_MAX_UNITS}x{A1_MINI_MAX_UNITS} unidades ({A1_MINI_MAX_UNITS * GRID_UNIT:.0f}mm)")
+        else:
+            st.warning("**Modo ilimitado:** Gera peças inteiras (requer impressora maior)")
+        
+        st.divider()
+        
+        # Informações do Gridfinity
+        st.header("📐 Especificações Gridfinity")
+        st.markdown(f"""
+        - **Unidade base:** {GRID_UNIT}mm × {GRID_UNIT}mm
+        - **Altura da unidade:** {GRID_HEIGHT_UNIT}mm
+        - **Limite A1 Mini:** {A1_MINI_MAX_UNITS}x{A1_MINI_MAX_UNITS} = {A1_MINI_MAX_UNITS * GRID_UNIT:.0f}mm
+        """)
+        
+        # Status do sistema
+        st.divider()
+        st.header("📦 Status do Sistema")
+        st.success("✅ Sistema Gridfinity Standalone - Sem dependências externas")
+    
+    # Tabs principais
+    tab_baseplate, tab_bins, tab_help = st.tabs(["🔲 Baseplate", "📦 Bins (Caixas)", "❓ Ajuda"])
+    
+    # ===== TAB BASEPLATE =====
+    with tab_baseplate:
+        st.header("🔲 Gerador de Baseplate")
+        st.markdown("Insira as dimensões internas da sua gaveta para calcular o grid Gridfinity ideal.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            drawer_x = st.number_input(
+                "📏 Largura da gaveta (mm)",
+                min_value=42,
+                max_value=2000,
+                value=300,
+                step=10,
+                help="Dimensão interna da gaveta no eixo X"
+            )
+        
+        with col2:
+            drawer_y = st.number_input(
+                "📐 Profundidade da gaveta (mm)",
+                min_value=42,
+                max_value=2000,
+                value=400,
+                step=10,
+                help="Dimensão interna da gaveta no eixo Y"
+            )
+        
+        # Cálculos
+        generator = BasePlateGenerator(optimize_for_a1_mini=optimize_a1_mini)
+        units_x, units_y = generator.calculate_grid_from_drawer(drawer_x, drawer_y)
+        tiles = generator.calculate_tiling_strategy(units_x, units_y)
+        needs_tiling = generator.needs_tiling(units_x, units_y)
+        
+        # Feedback visual
+        st.subheader("📊 Análise do Grid")
+        
+        total_width = units_x * GRID_UNIT
+        total_depth = units_y * GRID_UNIT
+        
+        col_info1, col_info2, col_info3 = st.columns(3)
+        
+        with col_info1:
+            st.metric("Grid Calculado", f"{units_x} × {units_y} unidades")
+        
+        with col_info2:
+            st.metric("Dimensão Total", f"{total_width:.0f} × {total_depth:.0f}mm")
+        
+        with col_info3:
+            st.metric("Peças a Gerar", len(tiles))
+        
+        # Descrição da estratégia
+        if needs_tiling and optimize_a1_mini:
+            st.markdown(f"""
+            <div class="info-box">
+                <strong>📋 Estratégia de Divisão:</strong><br>
+                Sua gaveta precisa de um grid <strong>{units_x}x{units_y}</strong>. 
+                Como excede o limite da A1 Mini, {generator.get_tiling_description(tiles)}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Mostrar detalhes das peças
+            st.markdown("**Peças geradas:**")
+            cols = st.columns(min(len(tiles), 4))
+            for i, (pos_x, pos_y, size_x, size_y) in enumerate(tiles):
+                with cols[i % 4]:
+                    st.info(f"**Peça {i+1}:** {size_x}×{size_y}\n\nPosição: ({pos_x}, {pos_y})")
+        else:
+            st.markdown(f"""
+            <div class="success-box">
+                <strong>✅ Sem divisão necessária:</strong> Grid {units_x}×{units_y} cabe na mesa de impressão.
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Botão de geração
+        st.divider()
+        
+        # Opção de conectores Refined
+        include_connectors = st.checkbox(
+            "🔗 Incluir conectores Refined",
+            value=True,
+            help="Gera clips para unir as peças do baseplate (recomendado se dividido)"
+        )
+        
+        if st.button("🔧 Gerar Baseplate", key="gen_baseplate", type="primary"):
+            with st.spinner("Gerando geometria 3D... Isso pode levar alguns segundos."):
+                try:
+                    compound, _, _, tiles_result, num_connectors = generator.generate_from_drawer(
+                        drawer_x, drawer_y, include_connectors=include_connectors
+                    )
+                    
+                    # Gera resumo
+                    summary = generator.get_generation_summary(units_x, units_y, tiles_result, num_connectors)
+                    
+                    # Exporta para STL
+                    stl_bytes = export_to_stl_bytes(compound)
+                    
+                    st.success(f"✅ {summary}")
+                    st.info(f"📁 Tamanho do arquivo: {get_file_size_str(len(stl_bytes))}")
+                    
+                    # Botão de download
+                    st.download_button(
+                        label="⬇️ Download STL",
+                        data=stl_bytes,
+                        file_name="baseplate_full_set_a1mini.stl",
+                        mime="application/octet-stream"
+                    )
+                except Exception as e:
+                    st.error(f"❌ Erro ao gerar baseplate: {str(e)}")
+    
+    # ===== TAB BINS =====
+    with tab_bins:
+        st.header("📦 Gerador de Bins (Caixas)")
+        st.markdown("Crie caixas Gridfinity personalizadas para organizar seus itens.")
+        
+        bin_gen = BinGenerator(optimize_for_a1_mini=optimize_a1_mini)
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            bin_x = st.number_input(
+                "Largura (unidades)",
+                min_value=1,
+                max_value=10,
+                value=2,
+                help="Número de unidades Gridfinity no eixo X"
+            )
+        
+        with col2:
+            bin_y = st.number_input(
+                "Profundidade (unidades)",
+                min_value=1,
+                max_value=10,
+                value=2,
+                help="Número de unidades Gridfinity no eixo Y"
+            )
+        
+        with col3:
+            bin_height = st.number_input(
+                "Altura (unidades)",
+                min_value=1,
+                max_value=10,
+                value=3,
+                help="Altura em unidades (1 unidade = 7mm)"
+            )
+        
+        # Validação
+        is_valid, validation_msg = bin_gen.validate_size(bin_x, bin_y)
+        
+        if not is_valid:
+            st.markdown(f"""
+            <div class="error-box">
+                {validation_msg}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="success-box">
+                {validation_msg}
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Opções adicionais
+        st.subheader("🎛️ Opções do Bin")
+        
+        col_opt1, col_opt2 = st.columns(2)
+        
+        with col_opt1:
+            with_label = st.checkbox("🏷️ Área para etiqueta", value=False)
+            with_scoop = st.checkbox("🥄 Rampa (scoop)", value=False)
+        
+        with col_opt2:
+            with_dividers = st.checkbox("➕ Divisórias internas", value=False)
+            
+            if with_dividers:
+                div_x = st.number_input("Divisões X", min_value=1, max_value=bin_x, value=min(2, bin_x))
+                div_y = st.number_input("Divisões Y", min_value=1, max_value=bin_y, value=1)
+            else:
+                div_x, div_y = 1, 1
+        
+        # Métricas do bin
+        st.subheader("📐 Dimensões do Bin")
+        
+        bin_width_mm = bin_x * GRID_UNIT - 0.5
+        bin_depth_mm = bin_y * GRID_UNIT - 0.5
+        bin_height_mm = bin_height * GRID_HEIGHT_UNIT
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        
+        with col_m1:
+            st.metric("Largura", f"{bin_width_mm:.1f}mm")
+        with col_m2:
+            st.metric("Profundidade", f"{bin_depth_mm:.1f}mm")
+        with col_m3:
+            st.metric("Altura", f"{bin_height_mm:.1f}mm")
+        
+        # Botão de geração
+        st.divider()
+        
+        if st.button("🔧 Gerar Bin", key="gen_bin", type="primary", disabled=not is_valid):
+            with st.spinner("Gerando geometria 3D do bin..."):
+                try:
+                    if with_dividers and (div_x > 1 or div_y > 1):
+                        bin_part = bin_gen.generate_divider_bin(
+                            bin_x, bin_y, bin_height, div_x, div_y
+                        )
+                    else:
+                        bin_part = bin_gen.generate_bin(
+                            bin_x, bin_y, bin_height,
+                            with_label=with_label,
+                            with_scoop=with_scoop
+                        )
+                    
+                    stl_bytes = export_to_stl_bytes(bin_part)
+                    
+                    st.success(f"✅ Bin gerado com sucesso! Tamanho: {get_file_size_str(len(stl_bytes))}")
+                    
+                    filename = f"bin_{bin_x}x{bin_y}x{bin_height}u.stl"
+                    
+                    st.download_button(
+                        label="⬇️ Download STL",
+                        data=stl_bytes,
+                        file_name=filename,
+                        mime="application/octet-stream"
+                    )
+                except Exception as e:
+                    st.error(f"❌ Erro ao gerar bin: {str(e)}")
+    
+    # ===== TAB AJUDA =====
+    with tab_help:
+        st.header("❓ Ajuda")
+        
+        st.markdown("""
+        ## O que é Gridfinity?
+        
+        Gridfinity é um sistema modular de organização criado por Zack Freedman. 
+        Consiste em baseplates (bases) e bins (caixas) que se encaixam em um grid padronizado de 42mm × 42mm.
+        
+        ## Como usar este gerador
+        
+        ### 1. Baseplate
+        1. Meça as dimensões internas da sua gaveta em milímetros
+        2. Insira os valores na aba "Baseplate"
+        3. O sistema calculará automaticamente quantas unidades cabem
+        4. Se você estiver usando uma A1 Mini, o sistema dividirá automaticamente peças grandes
+        5. Clique em "Gerar Baseplate" e faça o download do STL
+        
+        ### 2. Bins
+        1. Escolha as dimensões do bin em unidades Gridfinity
+        2. Selecione opções adicionais (etiqueta, rampa, divisórias)
+        3. Clique em "Gerar Bin" e faça o download
+        
+        ## Smart Tiling (Divisão Inteligente)
+        
+        Se você possui uma **Bambu Lab A1 Mini** (volume 180×180×180mm), o sistema 
+        automaticamente divide baseplates grandes em peças menores que cabem na mesa.
+        
+        **Exemplo:** Uma gaveta que precisa de grid 6×6:
+        - Peça 1: 4×4 (bloco principal)
+        - Peça 2: 2×4 (restante do eixo X)
+        - Peça 3: 4×2 (restante do eixo Y)
+        - Peça 4: 2×2 (canto)
+        
+        Todas as peças vêm em um único arquivo STL. Ao abrir no Bambu Studio, 
+        use "Auto-Arrange" para posicioná-las na mesa.
+        
+        ## Sobre Bins
+        
+        ⚠️ **Importante:** Diferente de baseplates, bins NÃO podem ser divididos 
+        automaticamente, pois são estruturas únicas. Se você tentar criar um bin 
+        maior que 4×4 unidades com a opção A1 Mini ativada, receberá um alerta.
+        
+        ## Dicas de Impressão
+        
+        - Use **0.2mm layer height** para boa qualidade
+        - **15-20% infill** é suficiente para bins
+        - Para baseplates, **3 wall loops** garantem rigidez
+        - Material recomendado: **PLA ou PETG**
+        """)
+        
+        st.divider()
+        
+        st.markdown("""
+        ## 📚 Recursos
+        
+        - [Gridfinity Original (YouTube)](https://www.youtube.com/watch?v=ra_9zU-mnl8)
+        - [Printables - Gridfinity Collection](https://www.printables.com/model/174715-gridfinity-specification)
+        - [Build123d Documentation](https://build123d.readthedocs.io/)
+        """)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
+FILE: docker-compose.yml
+================================================
+version: '3.8'
+
+services:
+  gridfinity-app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./:/app
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true
+    restart: unless-stopped
+
+
+
+================================================
+FILE: Dockerfile
+================================================
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Instala dependências do sistema necessárias para build123d/OCP
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglu1-mesa \
+    libx11-6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copia requirements primeiro para aproveitar cache
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copia o resto da aplicação
+COPY . .
+
+# Expõe porta do Streamlit
+EXPOSE 8501
+
+# Comando de execução
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+
+
+
+================================================
+FILE: pyproject.toml
+================================================
+[project]
+name = "gridfinity-generator"
+version = "1.1.0"
+description = "Gridfinity Generator Web App otimizado para Bambu Lab A1 Mini"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Gridfinity Generator Team"}
+]
+keywords = ["gridfinity", "3d-printing", "cad", "streamlit", "build123d"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+dependencies = [
+    "streamlit>=1.28.0",
+    "build123d>=0.5.0",
+    "cadquery-ocp>=7.7.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+gridfinity-app = "app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gridfinity"]
+
+
+
+================================================
+FILE: requirements.txt
+================================================
+streamlit>=1.28.0
+build123d>=0.5.0
+cadquery-ocp>=7.7.0
+numpy>=1.24.0
+
+
+
+================================================
+FILE: run.bat
+================================================
+@echo off
+REM Script para configurar e executar o Gridfinity Generator no Windows
+
+echo 🗃️ Gridfinity Generator - Setup
+echo ================================
+
+REM Verifica se Python está instalado
+python --version >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo ❌ Python não encontrado. Por favor, instale Python 3.10 ou superior.
+    exit /b 1
+)
+
+REM Cria ambiente virtual se não existir
+if not exist "venv" (
+    echo 📦 Criando ambiente virtual...
+    python -m venv venv
+)
+
+REM Ativa ambiente virtual
+echo 🔄 Ativando ambiente virtual...
+call venv\Scripts\activate.bat
+
+REM Instala dependências
+echo 📥 Instalando dependências...
+pip install --upgrade pip
+pip install -r requirements.txt
+
+REM Executa a aplicação
+echo.
+echo 🚀 Iniciando Gridfinity Generator...
+echo    Acesse: http://localhost:8501
+echo.
+streamlit run app.py
+
+
+
+================================================
+FILE: run.sh
+================================================
+#!/bin/bash
+# Script para configurar e executar o Gridfinity Generator
+
+set -e
+
+echo "🗃️ Gridfinity Generator - Setup"
+echo "================================"
+
+# Verifica se Python está instalado
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Python 3 não encontrado. Por favor, instale Python 3.10 ou superior."
+    exit 1
+fi
+
+# Cria ambiente virtual se não existir
+if [ ! -d "venv" ]; then
+    echo "📦 Criando ambiente virtual..."
+    python3 -m venv venv
+fi
+
+# Ativa ambiente virtual
+echo "🔄 Ativando ambiente virtual..."
+source venv/bin/activate
+
+# Instala dependências
+echo "📥 Instalando dependências..."
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Executa a aplicação
+echo ""
+echo "🚀 Iniciando Gridfinity Generator..."
+echo "   Acesse: http://localhost:8501"
+echo ""
+streamlit run app.py
+
+
+
+================================================
+FILE: gridfinity/__init__.py
+================================================
+# Gridfinity Generator Module
+from .baseplate import BasePlateGenerator
+from .bins import BinGenerator
+from .constants import *
+from .export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str
+
+__all__ = [
+    'BasePlateGenerator',
+    'BinGenerator',
+    'create_download_zip',
+    'export_to_stl_bytes',
+    'get_file_size_str',
+    'GRID_UNIT',
+    'GRID_HEIGHT_UNIT',
+    'A1_MINI_MAX_UNITS',
+]
+
+
+
+================================================
+FILE: gridfinity/baseplate.py
+================================================
+"""
+Gerador de Baseplates Gridfinity - Versão Standalone (Sem dependências extras)
+Desenha a geometria "na mão" para garantir compatibilidade e controle total.
+"""
+
+from build123d import *
+from typing import List, Tuple, Optional
+from .constants import *
+
+class BasePlateGenerator:
+    def __init__(self, optimize_for_a1_mini: bool = True):
+        self.optimize_for_a1_mini = optimize_for_a1_mini
+        self.max_units = A1_MINI_MAX_UNITS if optimize_for_a1_mini else 20
+
+    # --- Lógica de Cálculo (Matemática) ---
+
+    def calculate_grid_from_drawer(self, drawer_x_mm: float, drawer_y_mm: float) -> Tuple[int, int]:
+        units_x = int(drawer_x_mm // GRID_UNIT)
+        units_y = int(drawer_y_mm // GRID_UNIT)
+        return max(1, units_x), max(1, units_y)
+
+    def calculate_tiling_strategy(self, total_x: int, total_y: int) -> List[Tuple[int, int, int, int]]:
+        tiles = []
+        for x in range(0, total_x, self.max_units):
+            for y in range(0, total_y, self.max_units):
+                chunk_x = min(self.max_units, total_x - x)
+                chunk_y = min(self.max_units, total_y - y)
+                tiles.append((x, y, chunk_x, chunk_y))
+        return tiles
+
+    # --- Geometria dos Conectores (Gridfinity Refined) ---
+
+    def _get_connector_cutout_shape(self) -> Part:
+        """Cria o formato do BURACO do conector (fêmea)"""
+        middle_width = 6.0 / 2
+        middle_height = 3.0
+        thickness = 10.0 # Profundidade exagerada para garantir o corte
+        
+        with BuildPart() as part:
+            with BuildSketch() as sketch:
+                with BuildLine():
+                    l0 = Line((0, 0), (middle_width, 0))
+                    l1 = Line(l0 @ 1, (middle_width, middle_height))
+                    l2 = Line(l1 @ 1, ((l1 @ 1).X + 4, (l1 @ 1).Y + 3))
+                    l3 = Line(l2 @ 1, ((l2 @ 1).X, (l2 @ 1).Y + 3))
+                    Line(l3 @ 1, (0, (l3 @ 1).Y))
+                    mirror(about=Plane.YZ)
+                make_face()
+            extrude(sketch.sketch, thickness)
+            
+        # Rotaciona para ficar na orientação certa para cortar a lateral
+        return part.part
+
+    def _create_connector_clip(self) -> Part:
+        """Cria o CLIP físico (macho) para impressão"""
+        middle_width = 5.8 / 2
+        middle_height = 6.5 / 2
+        thickness = 2.8
+        chamfer_value = 0.4
+
+        with BuildPart() as part:
+            with BuildSketch() as sketch:
+                with BuildLine():
+                    l1 = Line((middle_width, 0), (middle_width, middle_height))
+                    l2 = Line(l1 @ 1, ((l1 @ 1).X + 3.9, (l1 @ 1).Y + 2.92))
+                    l3 = Line(l2 @ 1, ((l2 @ 1).X, (l2 @ 1).Y + 2.53))
+                    Line(l3 @ 1, (0, (l3 @ 1).Y))
+                    mirror(about=Plane.XZ)
+                    mirror(about=Plane.YZ)
+                make_face()
+            extrude(sketch.sketch, thickness)
+            try:
+                faces = [face.edges() for face in part.faces().filter_by(Axis.Z)]
+                chamfer(faces, chamfer_value)
+            except:
+                pass 
+        return part.part
+
+    # --- Geometria do Baseplate (Modo Verboso/Manual) ---
+
+    def _create_simple_baseplate(self, size_x: int, size_y: int, has_cutouts: dict) -> Part:
+        """
+        Cria o baseplate manualmente (RectangleRounded + Extrude).
+        has_cutouts: dict indicando onde cortar {'top': bool, 'bottom': bool...}
+        """
+        width = size_x * GRID_UNIT
+        depth = size_y * GRID_UNIT
+        
+        # 1. Base Sólida
+        with BuildPart() as base:
+            with BuildSketch():
+                RectangleRounded(width, depth, BASEPLATE_CORNER_RADIUS)
+            extrude(amount=BASEPLATE_HEIGHT)
+
+            # 2. Recortes dos "Squares" (onde a caixa encaixa)
+            # Desenhamos um perfil e subtraímos
+            for ix in range(size_x):
+                for iy in range(size_y):
+                    # Calcula posição
+                    cx = (ix - (size_x - 1) / 2) * GRID_UNIT
+                    cy = (iy - (size_y - 1) / 2) * GRID_UNIT
+                    
+                    # Corte superior (o chanfro grande)
+                    with BuildSketch(Plane.XY.offset(BASEPLATE_HEIGHT)):
+                        with Locations((cx, cy)):
+                            RectangleRounded(GRID_UNIT - 0.5, GRID_UNIT - 0.5, BASEPLATE_CORNER_RADIUS - 0.25)
+                    extrude(amount=-BASEPLATE_LIP_HEIGHT, mode=Mode.SUBTRACT)
+
+                    # Corte inferior (o quadrado interno)
+                    with BuildSketch(Plane.XY.offset(BASEPLATE_HEIGHT - BASEPLATE_LIP_HEIGHT)):
+                        with Locations((cx, cy)):
+                            RectangleRounded(
+                                GRID_UNIT - 0.5 - BASEPLATE_LIP_WIDTH*2, 
+                                GRID_UNIT - 0.5 - BASEPLATE_LIP_WIDTH*2, 
+                                BASEPLATE_CORNER_RADIUS - 0.5
+                            )
+                    extrude(amount=-(BASEPLATE_HEIGHT - BASEPLATE_LIP_HEIGHT), mode=Mode.SUBTRACT)
+
+            # 3. Adiciona os cortes laterais para conectores (Se necessário)
+            # A lógica aqui é posicionar o objeto de corte na borda correta e subtrair
+            cutout_tool = self._get_connector_cutout_shape()
+            
+            # Se tiver corte na direita (+X)
+            if has_cutouts.get('right'):
+                # Rotaciona para apontar para X
+                tool = cutout_tool.rotate(Axis.X, -90).rotate(Axis.Z, -90)
+                # Posiciona na borda direita
+                tool = tool.move(Location((width/2, 0, BASEPLATE_HEIGHT/2)))
+                add(tool, mode=Mode.SUBTRACT)
+
+            # Se tiver corte na esquerda (-X)
+            if has_cutouts.get('left'):
+                tool = cutout_tool.rotate(Axis.X, -90).rotate(Axis.Z, 90)
+                tool = tool.move(Location((-width/2, 0, BASEPLATE_HEIGHT/2)))
+                add(tool, mode=Mode.SUBTRACT)
+
+            # Se tiver corte em cima (+Y)
+            if has_cutouts.get('top'):
+                tool = cutout_tool.rotate(Axis.X, -90).rotate(Axis.Z, 180)
+                tool = tool.move(Location((0, depth/2, BASEPLATE_HEIGHT/2)))
+                add(tool, mode=Mode.SUBTRACT)
+
+            # Se tiver corte em baixo (-Y)
+            if has_cutouts.get('bottom'):
+                tool = cutout_tool.rotate(Axis.X, -90)
+                tool = tool.move(Location((0, -depth/2, BASEPLATE_HEIGHT/2)))
+                add(tool, mode=Mode.SUBTRACT)
+
+        return base.part
+
+    # --- Fluxo Principal ---
+
+    def generate_from_drawer(
+        self, 
+        drawer_x_mm: float, 
+        drawer_y_mm: float, 
+        include_connectors: bool = True
+    ) -> Tuple[Compound, int, int, List[Tuple[int, int, int, int]], int]:
+        
+        # 1. Calcula Grid
+        units_x, units_y = self.calculate_grid_from_drawer(drawer_x_mm, drawer_y_mm)
+        
+        # 2. Define Tiles
+        tiles = self.calculate_tiling_strategy(units_x, units_y)
+        
+        parts_export = []
+        spacing = A1_MINI_MAX_UNITS * GRID_UNIT + 10
+
+        # 3. Gera cada Tile
+        for idx, (pos_x, pos_y, size_x, size_y) in enumerate(tiles):
+            # Lógica para saber onde colocar furos de conector
+            # "Tenho alguém à minha direita?" -> Se (minha posição X + meu tamanho) < total X
+            has_right = (pos_x + size_x) < units_x
+            has_left = pos_x > 0
+            has_top = (pos_y + size_y) < units_y
+            has_bottom = pos_y > 0
+            
+            cutouts = {
+                'right': has_right,
+                'left': has_left,
+                'top': has_top,
+                'bottom': has_bottom
+            }
+
+            # Gera a peça
+            part = self._create_simple_baseplate(size_x, size_y, cutouts)
+            
+            # Posiciona para exportação (cria cópia independente)
+            loc_x = (idx % 3) * spacing
+            loc_y = (idx // 3) * spacing
+            part_copy = Part(part.wrapped).move(Location((loc_x, loc_y, 0)))
+            parts_export.append(part_copy)
+
+        # 4. Gera Clipes (Macho)
+        num_connectors = 0
+        if len(tiles) > 1 and include_connectors:
+            clip = self._create_connector_clip()
+            # Estimativa de clipes necessários (um pouco a mais por segurança)
+            num_connectors = len(tiles) * 2 
+            
+            for i in range(num_connectors):
+                # Cria cópia independente do conector
+                clip_copy = Part(clip.wrapped).move(Location((-50, i * 20, 0)))
+                parts_export.append(clip_copy)
+
+        return Compound(children=parts_export), units_x, units_y, tiles, num_connectors
+
+    def get_tiling_description(self, tiles):
+        if len(tiles) == 1:
+            return "Peça única."
+        return f"Dividido em {len(tiles)} partes."
+
+    def get_generation_summary(self, ux, uy, tiles, n_conn):
+        return f"Grid {ux}x{uy} ({len(tiles)} partes + {n_conn} conectores)"
+
+    def needs_tiling(self, ux, uy):
+        return ux > self.max_units or uy > self.max_units
+
+
+================================================
+FILE: gridfinity/bins.py
+================================================
+"""
+Gerador de Bins (Caixas) Gridfinity
+"""
+
+from build123d import *
+from typing import Tuple, Optional
+from .constants import *
+
+
+class BinGenerator:
+    """
+    Gera bins (caixas) Gridfinity personalizados.
+    """
+    
+    def __init__(self, optimize_for_a1_mini: bool = True):
+        """
+        Inicializa o gerador de bins.
+        
+        Args:
+            optimize_for_a1_mini: Se True, valida contra limite de 4x4 unidades
+        """
+        self.optimize_for_a1_mini = optimize_for_a1_mini
+        self.max_units = A1_MINI_MAX_UNITS if optimize_for_a1_mini else 999
+    
+    def validate_size(self, units_x: int, units_y: int) -> Tuple[bool, str]:
+        """
+        Valida se o tamanho do bin é compatível com a impressora.
+        
+        Args:
+            units_x: Unidades no eixo X
+            units_y: Unidades no eixo Y
+            
+        Returns:
+            Tuple com (is_valid, message)
+        """
+        if not self.optimize_for_a1_mini:
+            return True, "Validação desativada."
+        
+        width_mm = units_x * GRID_UNIT
+        depth_mm = units_y * GRID_UNIT
+        
+        if units_x > self.max_units or units_y > self.max_units:
+            return False, (
+                f"⚠️ ALERTA DE INCOMPATIBILIDADE: "
+                f"Bin {units_x}x{units_y} ({width_mm:.0f}x{depth_mm:.0f}mm) "
+                f"excede o limite da A1 Mini (máximo {self.max_units}x{self.max_units} = "
+                f"{self.max_units * GRID_UNIT:.0f}mm). "
+                f"Diferente de baseplates, bins não podem ser divididos e remontados."
+            )
+        
+        return True, f"✅ Bin {units_x}x{units_y} compatível com A1 Mini."
+    
+    def generate_bin(
+        self,
+        units_x: int,
+        units_y: int,
+        height_units: int = 3,
+        with_label: bool = False,
+        with_scoop: bool = False,
+        wall_thickness: float = BIN_WALL_THICKNESS
+    ) -> Part:
+        """
+        Gera um bin Gridfinity.
+        
+        Args:
+            units_x: Número de unidades no eixo X
+            units_y: Número de unidades no eixo Y
+            height_units: Altura em unidades (1 unidade = 7mm)
+            with_label: Adiciona área para etiqueta na frente
+            with_scoop: Adiciona rampa para facilitar pegar itens
+            wall_thickness: Espessura da parede
+            
+        Returns:
+            Objeto Part representando o bin
+        """
+        width = units_x * GRID_UNIT - 0.5  # Folga para encaixe
+        depth = units_y * GRID_UNIT - 0.5
+        height = height_units * GRID_HEIGHT_UNIT
+        
+        with BuildPart() as bin_part:
+            # Corpo externo do bin
+            with BuildSketch():
+                RectangleRounded(
+                    width=width,
+                    height=depth,
+                    radius=BIN_CORNER_RADIUS
+                )
+            extrude(amount=height)
+            
+            # Cavidade interna
+            internal_width = width - wall_thickness * 2
+            internal_depth = depth - wall_thickness * 2
+            internal_height = height - BIN_BOTTOM_THICKNESS
+            
+            with BuildSketch(Plane.XY.offset(BIN_BOTTOM_THICKNESS)):
+                RectangleRounded(
+                    width=internal_width,
+                    height=internal_depth,
+                    radius=BIN_CORNER_RADIUS - wall_thickness
+                )
+            extrude(amount=internal_height, mode=Mode.SUBTRACT)
+            
+            # Lip (borda) para empilhamento
+            self._add_stacking_lip(bin_part, width, depth, height)
+            
+            # Base com perfil de encaixe no baseplate
+            self._add_base_profile(bin_part, width, depth)
+            
+            # Recursos opcionais
+            if with_scoop:
+                self._add_scoop(bin_part, internal_width, internal_depth, internal_height)
+            
+            if with_label:
+                self._add_label_area(bin_part, width, height)
+        
+        return bin_part.part
+    
+    def _add_stacking_lip(
+        self,
+        builder,
+        width: float,
+        depth: float,
+        height: float
+    ):
+        """Adiciona lip para empilhamento."""
+        lip_outer = 2.6
+        lip_height = 4.4
+        
+        with BuildSketch(Plane.XY.offset(height)):
+            RectangleRounded(
+                width=width,
+                height=depth,
+                radius=BIN_CORNER_RADIUS
+            )
+            RectangleRounded(
+                width=width - lip_outer * 2,
+                height=depth - lip_outer * 2,
+                radius=BIN_CORNER_RADIUS - lip_outer,
+                mode=Mode.SUBTRACT
+            )
+        extrude(amount=-lip_height, mode=Mode.SUBTRACT)
+    
+    def _add_base_profile(self, builder, width: float, depth: float):
+        """Adiciona perfil de encaixe na base para conectar ao baseplate."""
+        # Chanfro na base para encaixe suave
+        base_inset = 0.8
+        base_height = 4.65
+        
+        with BuildSketch(Plane.XY):
+            RectangleRounded(
+                width=width,
+                height=depth,
+                radius=BIN_CORNER_RADIUS
+            )
+            RectangleRounded(
+                width=width - base_inset * 2,
+                height=depth - base_inset * 2,
+                radius=BIN_CORNER_RADIUS - base_inset,
+                mode=Mode.SUBTRACT
+            )
+        extrude(amount=base_height, mode=Mode.SUBTRACT)
+    
+    def _add_scoop(
+        self,
+        builder,
+        internal_width: float,
+        internal_depth: float,
+        internal_height: float
+    ):
+        """Adiciona rampa (scoop) para facilitar pegar itens."""
+        scoop_depth = internal_depth * 0.3
+        
+        with BuildSketch(Plane.XZ.offset(-internal_depth / 2 + BIN_WALL_THICKNESS)):
+            with Locations([(0, BIN_BOTTOM_THICKNESS + internal_height / 4)]):
+                Ellipse(
+                    x_radius=internal_width / 3,
+                    y_radius=internal_height / 3
+                )
+        extrude(amount=scoop_depth, mode=Mode.SUBTRACT)
+    
+    def _add_label_area(self, builder, width: float, height: float):
+        """Adiciona área inclinada para etiqueta na frente."""
+        label_width = width * 0.8
+        label_height = 12  # mm
+        label_depth = 0.6  # profundidade do rebaixo
+        
+        # Área rebaixada para etiqueta
+        with BuildSketch(Plane.XZ.offset(-width / 2)):
+            with Locations([(0, height - label_height / 2 - 2)]):
+                RectangleRounded(
+                    width=label_width,
+                    height=label_height,
+                    radius=1.5
+                )
+        extrude(amount=label_depth, mode=Mode.SUBTRACT)
+    
+    def generate_divider_bin(
+        self,
+        units_x: int,
+        units_y: int,
+        height_units: int = 3,
+        divisions_x: int = 1,
+        divisions_y: int = 1
+    ) -> Part:
+        """
+        Gera um bin com divisórias internas.
+        
+        Args:
+            units_x: Unidades no eixo X
+            units_y: Unidades no eixo Y
+            height_units: Altura em unidades
+            divisions_x: Número de divisões no eixo X
+            divisions_y: Número de divisões no eixo Y
+            
+        Returns:
+            Objeto Part representando o bin com divisórias
+        """
+        # Primeiro, gera o bin base
+        base_bin = self.generate_bin(units_x, units_y, height_units)
+        
+        width = units_x * GRID_UNIT - 0.5
+        depth = units_y * GRID_UNIT - 0.5
+        height = height_units * GRID_HEIGHT_UNIT
+        
+        internal_width = width - BIN_WALL_THICKNESS * 2
+        internal_depth = depth - BIN_WALL_THICKNESS * 2
+        internal_height = height - BIN_BOTTOM_THICKNESS
+        
+        divider_thickness = 1.0  # mm
+        
+        with BuildPart() as bin_with_dividers:
+            add(base_bin)
+            
+            # Divisórias no eixo X
+            if divisions_x > 1:
+                cell_width = internal_width / divisions_x
+                for i in range(1, divisions_x):
+                    x_pos = -internal_width / 2 + cell_width * i
+                    with BuildSketch(Plane.YZ.offset(x_pos)):
+                        Rectangle(internal_depth, internal_height)
+                    extrude(amount=divider_thickness, both=True)
+            
+            # Divisórias no eixo Y
+            if divisions_y > 1:
+                cell_depth = internal_depth / divisions_y
+                for i in range(1, divisions_y):
+                    y_pos = -internal_depth / 2 + cell_depth * i
+                    with BuildSketch(Plane.XZ.offset(y_pos)):
+                        Rectangle(internal_width, internal_height)
+                    extrude(amount=divider_thickness, both=True)
+        
+        return bin_with_dividers.part
+
+
+
+================================================
+FILE: gridfinity/constants.py
+================================================
+"""
+Constantes do padrão Gridfinity
+"""
+
+# Dimensões base do Gridfinity
+GRID_UNIT = 42.0  # mm - tamanho de uma unidade
+GRID_HEIGHT_UNIT = 7.0  # mm - altura de uma unidade
+
+# Dimensões do baseplate
+BASEPLATE_HEIGHT = 4.65  # mm
+BASEPLATE_LIP_HEIGHT = 2.15  # mm
+BASEPLATE_LIP_WIDTH = 0.8  # mm
+BASEPLATE_CORNER_RADIUS = 3.75  # mm
+BASEPLATE_MAGNET_HOLE_DIAMETER = 6.5  # mm
+BASEPLATE_MAGNET_HOLE_DEPTH = 2.4  # mm
+BASEPLATE_SCREW_HOLE_DIAMETER = 3.0  # mm
+
+# Dimensões do bin
+BIN_WALL_THICKNESS = 1.2  # mm
+BIN_BOTTOM_THICKNESS = 0.8  # mm
+BIN_CORNER_RADIUS = 3.75  # mm
+BIN_LIP_HEIGHT = 4.4  # mm
+BIN_LIP_WIDTH = 2.6  # mm
+
+# Limites da Bambu Lab A1 Mini
+A1_MINI_BUILD_VOLUME_X = 180  # mm
+A1_MINI_BUILD_VOLUME_Y = 180  # mm
+A1_MINI_BUILD_VOLUME_Z = 180  # mm
+A1_MINI_MAX_UNITS = 4  # máximo de unidades por eixo (4 * 42 = 168mm < 180mm)
+
+# Espaçamento para exportação lado a lado
+EXPORT_SPACING = 45.0  # mm (42mm + 3mm de folga visual)
+
+
+
+================================================
+FILE: gridfinity/export_utils.py
+================================================
+"""
+Utilitários para exportação de arquivos STL e ZIP
+"""
+
+import io
+import zipfile
+import tempfile
+import os
+from typing import List, Tuple, Optional
+from build123d import Compound, Part, export_stl
+
+
+def export_to_stl_bytes(shape: Compound | Part, tolerance: float = 0.001) -> bytes:
+    """
+    Exporta um shape para bytes STL.
+    
+    Args:
+        shape: Objeto Compound ou Part do build123d
+        tolerance: Tolerância para tessellation
+        
+    Returns:
+        Bytes do arquivo STL
+    """
+    with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as tmp:
+        tmp_path = tmp.name
+    
+    try:
+        export_stl(shape, tmp_path, tolerance=tolerance)
+        with open(tmp_path, 'rb') as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def create_download_zip(
+    baseplate: Optional[Compound | Part] = None,
+    bins: Optional[List[Tuple[str, Part]]] = None,
+    baseplate_filename: str = "baseplate_full_set_a1mini.stl"
+) -> bytes:
+    """
+    Cria arquivo ZIP contendo baseplate e bins.
+    
+    Args:
+        baseplate: Compound com todas as peças do baseplate
+        bins: Lista de tuplas (nome_arquivo, Part) para os bins
+        baseplate_filename: Nome do arquivo do baseplate no ZIP
+        
+    Returns:
+        Bytes do arquivo ZIP
+    """
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # Adiciona baseplate
+        if baseplate is not None:
+            stl_bytes = export_to_stl_bytes(baseplate)
+            zf.writestr(baseplate_filename, stl_bytes)
+        
+        # Adiciona bins
+        if bins:
+            for filename, bin_part in bins:
+                stl_bytes = export_to_stl_bytes(bin_part)
+                zf.writestr(filename, stl_bytes)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+
+def get_file_size_str(size_bytes: int) -> str:
+    """Converte bytes para string legível."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+
+================================================
+FILE: tests/__init__.py
+================================================
+# Tests package
+
+
+
+================================================
+FILE: tests/conftest.py
+================================================
+"""
+Configuração de testes pytest.
+"""
+
+import pytest
+import sys
+from pathlib import Path
+
+# Adiciona o diretório raiz ao path
+root_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(root_dir))
+
+
+
+================================================
+FILE: tests/test_baseplate.py
+================================================
+"""
+Testes para o gerador de baseplates.
+"""
+
+import pytest
+from gridfinity.baseplate import BasePlateGenerator
+from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS
+
+
+class TestBasePlateGenerator:
+    """Testes para BasePlateGenerator."""
+    
+    def test_calculate_grid_from_drawer(self):
+        """Testa cálculo de grid a partir da gaveta."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        
+        # 300mm / 42mm = 7.14 -> 7 unidades
+        units_x, units_y = gen.calculate_grid_from_drawer(300, 200)
+        assert units_x == 7
+        assert units_y == 4
+    
+    def test_calculate_grid_minimum(self):
+        """Testa que sempre retorna pelo menos 1 unidade."""
+        gen = BasePlateGenerator()
+        units_x, units_y = gen.calculate_grid_from_drawer(30, 30)
+        assert units_x >= 1
+        assert units_y >= 1
+    
+    def test_tiling_strategy_no_split(self):
+        """Testa estratégia sem divisão (3x3)."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        tiles = gen.calculate_tiling_strategy(3, 3)
+        
+        assert len(tiles) == 1
+        assert tiles[0] == (0, 0, 3, 3)
+    
+    def test_tiling_strategy_with_split(self):
+        """Testa estratégia com divisão (6x6)."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        tiles = gen.calculate_tiling_strategy(6, 6)
+        
+        # 6x6 deve gerar 4 peças: 4x4, 2x4, 4x2, 2x2
+        assert len(tiles) == 4
+        
+        # Verifica as peças esperadas
+        expected_sizes = {(4, 4), (2, 4), (4, 2), (2, 2)}
+        actual_sizes = {(t[2], t[3]) for t in tiles}
+        assert actual_sizes == expected_sizes
+    
+    def test_tiling_strategy_7x4(self):
+        """Testa estratégia 7x4 (exemplo do PRD)."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        tiles = gen.calculate_tiling_strategy(7, 4)
+        
+        # 7x4 deve gerar 2 peças: 4x4 e 3x4
+        assert len(tiles) == 2
+        
+        sizes = [(t[2], t[3]) for t in tiles]
+        assert (4, 4) in sizes
+        assert (3, 4) in sizes
+    
+    def test_needs_tiling_false(self):
+        """Testa que 4x4 não precisa divisão."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        assert not gen.needs_tiling(4, 4)
+        assert not gen.needs_tiling(3, 3)
+        assert not gen.needs_tiling(1, 1)
+    
+    def test_needs_tiling_true(self):
+        """Testa que grids maiores precisam divisão."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        assert gen.needs_tiling(5, 4)
+        assert gen.needs_tiling(4, 5)
+        assert gen.needs_tiling(6, 6)
+    
+    def test_no_optimization_mode(self):
+        """Testa modo sem otimização."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=False)
+        
+        # Mesmo grids grandes não devem ser divididos
+        tiles = gen.calculate_tiling_strategy(10, 10)
+        assert len(tiles) == 1
+        assert tiles[0] == (0, 0, 10, 10)
+    
+    def test_tiling_description_single(self):
+        """Testa descrição para peça única."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        tiles = gen.calculate_tiling_strategy(3, 3)
+        desc = gen.get_tiling_description(tiles)
+        
+        assert "peça única" in desc.lower() or "sem divisão" in desc.lower()
+    
+    def test_tiling_description_multiple(self):
+        """Testa descrição para múltiplas peças."""
+        gen = BasePlateGenerator(optimize_for_a1_mini=True)
+        tiles = gen.calculate_tiling_strategy(6, 6)
+        desc = gen.get_tiling_description(tiles)
+        
+        assert "4" in desc  # Deve mencionar 4 partes
+        assert "4x4" in desc  # Deve mencionar tamanhos
+
+
+
+================================================
+FILE: tests/test_bins.py
+================================================
+"""
+Testes para o gerador de bins.
+"""
+
+import pytest
+from gridfinity.bins import BinGenerator
+from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS
+
+
+class TestBinGenerator:
+    """Testes para BinGenerator."""
+    
+    def test_validate_size_valid(self):
+        """Testa validação de tamanho válido."""
+        gen = BinGenerator(optimize_for_a1_mini=True)
+        
+        is_valid, msg = gen.validate_size(2, 2)
+        assert is_valid
+        assert "✅" in msg or "compatível" in msg.lower()
+    
+    def test_validate_size_max_limit(self):
+        """Testa validação no limite máximo."""
+        gen = BinGenerator(optimize_for_a1_mini=True)
+        
+        is_valid, msg = gen.validate_size(4, 4)
+        assert is_valid
+    
+    def test_validate_size_invalid(self):
+        """Testa validação de tamanho inválido."""
+        gen = BinGenerator(optimize_for_a1_mini=True)
+        
+        is_valid, msg = gen.validate_size(5, 4)
+        assert not is_valid
+        assert "alerta" in msg.lower() or "⚠️" in msg
+    
+    def test_validate_size_both_exceed(self):
+        """Testa validação quando ambos eixos excedem."""
+        gen = BinGenerator(optimize_for_a1_mini=True)
+        
+        is_valid, msg = gen.validate_size(5, 5)
+        assert not is_valid
+    
+    def test_validate_size_no_optimization(self):
+        """Testa validação sem otimização."""
+        gen = BinGenerator(optimize_for_a1_mini=False)
+        
+        is_valid, msg = gen.validate_size(10, 10)
+        assert is_valid
+    
+    def test_bin_dimensions(self):
+        """Testa cálculo de dimensões do bin."""
+        # Dimensões esperadas para bin 2x2x3
+        expected_width = 2 * GRID_UNIT - 0.5  # 83.5mm
+        expected_depth = 2 * GRID_UNIT - 0.5  # 83.5mm
+        
+        assert expected_width == 83.5
+        assert expected_depth == 83.5
+
+
+
+================================================
+FILE: tests/test_constants.py
+================================================
+"""
+Testes unitários para o módulo Gridfinity Generator
+"""
+
+import pytest
+from gridfinity.constants import (
+    GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT
+)
+
+
+class TestConstants:
+    """Testes para as constantes do Gridfinity."""
+    
+    def test_grid_unit_value(self):
+        """Verifica se a unidade de grid está correta."""
+        assert GRID_UNIT == 42.0
+    
+    def test_a1_mini_max_units(self):
+        """Verifica limite da A1 Mini."""
+        assert A1_MINI_MAX_UNITS == 4
+        # 4 unidades * 42mm = 168mm < 180mm (volume A1 Mini)
+        assert A1_MINI_MAX_UNITS * GRID_UNIT < 180
+    
+    def test_grid_height_unit(self):
+        """Verifica altura da unidade."""
+        assert GRID_HEIGHT_UNIT == 7.0
+
+
+
+================================================
+FILE: .streamlit/config.toml
+================================================
+[theme]
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+font = "sans serif"
+
+

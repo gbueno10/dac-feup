@@ -1,0 +1,44 @@
+[project]
+name = "gridfinity-generator"
+version = "1.1.0"
+description = "Gridfinity Generator Web App otimizado para Bambu Lab A1 Mini"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Gridfinity Generator Team"}
+]
+keywords = ["gridfinity", "3d-printing", "cad", "streamlit", "build123d"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+dependencies = [
+    "streamlit>=1.28.0",
+    "build123d>=0.5.0",
+    "cadquery-ocp>=7.7.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+gridfinity-app = "app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gridfinity"]

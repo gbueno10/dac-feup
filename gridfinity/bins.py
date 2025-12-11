@@ -1,0 +1,224 @@
+"""
+Gerador de Bins (Caixas) Gridfinity
+"""
+
+from build123d import *
+from typing import Tuple, Optional
+from .constants import *
+
+
+class BinGenerator:
+    """
+    Gera bins (caixas) Gridfinity personalizados.
+    """
+    
+    def __init__(self, optimize_for_a1_mini: bool = True):
+        """
+        Inicializa o gerador de bins.
+        
+        Args:
+            optimize_for_a1_mini: Se True, valida contra limite de 4x4 unidades
+        """
+        self.optimize_for_a1_mini = optimize_for_a1_mini
+        self.max_units = A1_MINI_MAX_UNITS if optimize_for_a1_mini else 999
+    
+    def validate_size(self, units_x: int, units_y: int) -> Tuple[bool, str]:
+        """
+        Valida se o tamanho do bin é compatível com a impressora.
+        
+        Args:
+            units_x: Unidades no eixo X
+            units_y: Unidades no eixo Y
+            
+        Returns:
+            Tuple com (is_valid, message)
+        """
+        if not self.optimize_for_a1_mini:
+            return True, "Validação desativada."
+        
+        width_mm = units_x * GRID_UNIT
+        depth_mm = units_y * GRID_UNIT
+        
+        if units_x > self.max_units or units_y > self.max_units:
+            return False, (
+                f"⚠️ ALERTA DE INCOMPATIBILIDADE: "
+                f"Bin {units_x}x{units_y} ({width_mm:.0f}x{depth_mm:.0f}mm) "
+                f"excede o limite da A1 Mini (máximo {self.max_units}x{self.max_units} = "
+                f"{self.max_units * GRID_UNIT:.0f}mm). "
+                f"Diferente de baseplates, bins não podem ser divididos e remontados."
+            )
+        
+        return True, f"✅ Bin {units_x}x{units_y} compatível com A1 Mini."
+    
+    def generate_bin(
+        self,
+        units_x: int,
+        units_y: int,
+        height_units: int = 3,
+        with_label: bool = False,
+        with_scoop: bool = False,
+        wall_thickness: float = BIN_WALL_THICKNESS
+    ) -> Part:
+        """
+        Gera um bin Gridfinity.
+        
+        Args:
+            units_x: Número de unidades no eixo X
+            units_y: Número de unidades no eixo Y
+            height_units: Altura em unidades (1 unidade = 7mm)
+            with_label: Adiciona área para etiqueta na frente
+            with_scoop: Adiciona rampa para facilitar pegar itens
+            wall_thickness: Espessura da parede
+            
+        Returns:
+            Objeto Part representando o bin
+        """
+        width = units_x * GRID_UNIT - 0.5  # Folga para encaixe
+        depth = units_y * GRID_UNIT - 0.5
+        height = height_units * GRID_HEIGHT_UNIT
+        
+        internal_width = width - wall_thickness * 2
+        internal_depth = depth - wall_thickness * 2
+        internal_height = height - BIN_BOTTOM_THICKNESS
+        
+        with BuildPart() as bin_part:
+            # 1. Corpo externo do bin
+            with BuildSketch() as outer:
+                RectangleRounded(
+                    width=width,
+                    height=depth,
+                    radius=BIN_CORNER_RADIUS
+                )
+            extrude(amount=height)
+            
+            # 2. Cavidade interna
+            with BuildSketch(Plane.XY.offset(BIN_BOTTOM_THICKNESS)) as inner:
+                RectangleRounded(
+                    width=internal_width,
+                    height=internal_depth,
+                    radius=BIN_CORNER_RADIUS - wall_thickness
+                )
+            extrude(amount=internal_height, mode=Mode.SUBTRACT)
+            
+            # 3. Lip (borda) para empilhamento
+            lip_outer = 2.6
+            lip_height = 4.4
+            
+            with BuildSketch(Plane.XY.offset(height)) as lip:
+                RectangleRounded(
+                    width=width,
+                    height=depth,
+                    radius=BIN_CORNER_RADIUS
+                )
+                RectangleRounded(
+                    width=width - lip_outer * 2,
+                    height=depth - lip_outer * 2,
+                    radius=BIN_CORNER_RADIUS - lip_outer,
+                    mode=Mode.SUBTRACT
+                )
+            extrude(amount=-lip_height, mode=Mode.SUBTRACT)
+            
+            # 4. Base com perfil de encaixe no baseplate
+            base_inset = 0.8
+            base_height = 4.65
+            
+            with BuildSketch(Plane.XY) as base_profile:
+                RectangleRounded(
+                    width=width,
+                    height=depth,
+                    radius=BIN_CORNER_RADIUS
+                )
+                RectangleRounded(
+                    width=width - base_inset * 2,
+                    height=depth - base_inset * 2,
+                    radius=BIN_CORNER_RADIUS - base_inset,
+                    mode=Mode.SUBTRACT
+                )
+            extrude(amount=base_height, mode=Mode.SUBTRACT)
+            
+            # 5. Recursos opcionais - Scoop (rampa)
+            if with_scoop:
+                scoop_depth = internal_depth * 0.3
+                with BuildSketch(Plane.XZ.offset(-internal_depth / 2 + wall_thickness)) as scoop:
+                    with Locations([(0, BIN_BOTTOM_THICKNESS + internal_height / 4)]):
+                        Ellipse(
+                            x_radius=internal_width / 3,
+                            y_radius=internal_height / 3
+                        )
+                extrude(amount=scoop_depth, mode=Mode.SUBTRACT)
+            
+            # 6. Recursos opcionais - Label (etiqueta)
+            if with_label:
+                label_width = width * 0.8
+                label_height = 12  # mm
+                label_depth = 0.6  # profundidade do rebaixo
+                
+                with BuildSketch(Plane.XZ.offset(-depth / 2)) as label:
+                    with Locations([(0, height - label_height / 2 - 2)]):
+                        RectangleRounded(
+                            width=label_width,
+                            height=label_height,
+                            radius=1.5
+                        )
+                extrude(amount=label_depth, mode=Mode.SUBTRACT)
+        
+        return bin_part.part
+    
+    def generate_divider_bin(
+        self,
+        units_x: int,
+        units_y: int,
+        height_units: int = 3,
+        divisions_x: int = 1,
+        divisions_y: int = 1
+    ) -> Part:
+        """
+        Gera um bin com divisórias internas.
+        
+        Args:
+            units_x: Unidades no eixo X
+            units_y: Unidades no eixo Y
+            height_units: Altura em unidades
+            divisions_x: Número de divisões no eixo X
+            divisions_y: Número de divisões no eixo Y
+            
+        Returns:
+            Objeto Part representando o bin com divisórias
+        """
+        # Primeiro, gera o bin base
+        base_bin = self.generate_bin(units_x, units_y, height_units)
+        
+        width = units_x * GRID_UNIT - 0.5
+        depth = units_y * GRID_UNIT - 0.5
+        height = height_units * GRID_HEIGHT_UNIT
+        
+        internal_width = width - BIN_WALL_THICKNESS * 2
+        internal_depth = depth - BIN_WALL_THICKNESS * 2
+        internal_height = height - BIN_BOTTOM_THICKNESS
+        
+        divider_thickness = 1.0  # mm
+        
+        with BuildPart() as bin_with_dividers:
+            add(base_bin)
+            
+            # Divisórias no eixo X
+            if divisions_x > 1:
+                cell_width = internal_width / divisions_x
+                for i in range(1, divisions_x):
+                    x_pos = -internal_width / 2 + cell_width * i
+                    with BuildSketch(Plane.YZ.offset(x_pos)):
+                        with Locations((0, BIN_BOTTOM_THICKNESS + internal_height / 2)):
+                            Rectangle(internal_depth, internal_height)
+                    extrude(amount=divider_thickness / 2, both=True)
+            
+            # Divisórias no eixo Y
+            if divisions_y > 1:
+                cell_depth = internal_depth / divisions_y
+                for i in range(1, divisions_y):
+                    y_pos = -internal_depth / 2 + cell_depth * i
+                    with BuildSketch(Plane.XZ.offset(y_pos)):
+                        with Locations((0, BIN_BOTTOM_THICKNESS + internal_height / 2)):
+                            Rectangle(internal_width, internal_height)
+                    extrude(amount=divider_thickness / 2, both=True)
+        
+        return bin_with_dividers.part
