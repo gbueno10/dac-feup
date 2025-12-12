@@ -257,22 +257,25 @@ def main():
         # Botão de geração
         st.divider()
         
-        # Opção de conectores Refined
-        include_connectors = st.checkbox(
-            "🔗 Incluir conectores Refined",
-            value=True,
-            help="Gera clips para unir as peças do baseplate (recomendado se dividido)"
-        )
+        # Info sobre sistema Dovetail
+        if needs_tiling and optimize_a1_mini:
+            st.markdown("""
+            <div class="info-box">
+                <strong>🔗 Sistema de Encaixe Dovetail:</strong><br>
+                As peças serão geradas com encaixes tipo "rabo de andorinha" integrados.
+                Basta imprimir e encaixar - sem clipes extras necessários!
+            </div>
+            """, unsafe_allow_html=True)
         
         if st.button("🔧 Gerar Baseplate", key="gen_baseplate", type="primary"):
             with st.spinner("Gerando geometria 3D... Isso pode levar alguns segundos."):
                 try:
-                    compound, _, _, tiles_result, num_connectors = generator.generate_from_drawer(
-                        drawer_x, drawer_y, include_connectors=include_connectors
+                    compound, _, _, tiles_result, _ = generator.generate_from_drawer(
+                        drawer_x, drawer_y
                     )
                     
                     # Gera resumo
-                    summary = generator.get_generation_summary(units_x, units_y, tiles_result, num_connectors)
+                    summary = generator.get_generation_summary(units_x, units_y, tiles_result, 0)
                     
                     st.success(f"✅ {summary}")
                     
