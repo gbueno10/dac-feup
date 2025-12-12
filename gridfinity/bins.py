@@ -77,7 +77,6 @@ class BinGenerator:
         
         internal_width = width - wall_thickness * 2
         internal_depth = depth - wall_thickness * 2
-        internal_height = height - BIN_BOTTOM_THICKNESS
         
         # Constantes do perfil de encaixe (lip) - baseado no padrão Gridfinity
         # O perfil encaixa nos recortes do baseplate
@@ -85,6 +84,9 @@ class BinGenerator:
         lip_inner_size = lip_base_size - BASEPLATE_LIP_WIDTH * 2  # Parte inferior do lip
         lip_total_height = BASEPLATE_HEIGHT  # 4.65mm - altura total do lip
         lip_step_height = BASEPLATE_LIP_HEIGHT  # 2.15mm - altura do degrau superior
+        
+        # Altura interna: do fundo (acima do lip + bottom) até o topo
+        internal_height = height - lip_total_height - BIN_BOTTOM_THICKNESS
         
         with BuildPart() as bin_part:
             # 1. Corpo externo do bin (começa ACIMA do lip)
@@ -201,11 +203,11 @@ class BinGenerator:
         internal_width = width - BIN_WALL_THICKNESS * 2
         internal_depth = depth - BIN_WALL_THICKNESS * 2
         
-        # Altura das divisórias: do fundo interno até o topo do bin
-        # Fundo interno = BASEPLATE_HEIGHT (lip) + BIN_BOTTOM_THICKNESS
-        # Topo = height (altura total)
+        # Altura das divisórias: mesma altura da cavidade interna
+        # Fundo = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS = 5.45mm
+        # Topo = height (mesmo da cavidade, que vai até o topo do bin)
         divider_base_z = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS
-        divider_height = height - divider_base_z  # Altura até o topo
+        divider_height = height - divider_base_z  # Igual à cavidade interna
         
         divider_thickness = 1.0  # mm
         
@@ -213,12 +215,16 @@ class BinGenerator:
             add(base_bin)
             
             # Divisórias no eixo X
+            # Usamos Plane.YZ no offset X, o retângulo tem (largura_Y, altura_Z)
             if divisions_x > 1:
                 cell_width = internal_width / divisions_x
                 for i in range(1, divisions_x):
                     x_pos = -internal_width / 2 + cell_width * i
+                    # Desenha na base Z e extrude para cima
                     with BuildSketch(Plane.YZ.offset(x_pos)):
-                        with Locations((0, divider_base_z + divider_height / 2)):
+                        # Centro do retângulo no meio da altura da divisória
+                        center_z = divider_base_z + divider_height / 2
+                        with Locations((0, center_z)):
                             Rectangle(internal_depth, divider_height)
                     extrude(amount=divider_thickness / 2, both=True)
             
@@ -228,7 +234,8 @@ class BinGenerator:
                 for i in range(1, divisions_y):
                     y_pos = -internal_depth / 2 + cell_depth * i
                     with BuildSketch(Plane.XZ.offset(y_pos)):
-                        with Locations((0, divider_base_z + divider_height / 2)):
+                        center_z = divider_base_z + divider_height / 2
+                        with Locations((0, center_z)):
                             Rectangle(internal_width, divider_height)
                     extrude(amount=divider_thickness / 2, both=True)
         

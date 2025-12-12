@@ -4,6 +4,7 @@ Directory structure:
     ├── app.py
     ├── docker-compose.yml
     ├── Dockerfile
+    ├── generate_test_connectors.py
     ├── pyproject.toml
     ├── requirements.txt
     ├── run.bat
@@ -88,8 +89,8 @@ from typing import List, Tuple
 try:
     from build123d import Compound, Part, export_stl
     from gridfinity import BasePlateGenerator, BinGenerator
-    from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT
-    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str
+    from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT, A1_MINI_BUILD_VOLUME_X
+    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str, create_individual_parts_zip
     BUILD123D_AVAILABLE = True
 except ImportError as e:
     BUILD123D_AVAILABLE = False
@@ -246,7 +247,7 @@ def main():
         
         # Cálculos
         generator = BasePlateGenerator(optimize_for_a1_mini=optimize_a1_mini)
-        units_x, units_y = generator.calculate_grid_from_drawer(drawer_x, drawer_y)
+        units_x, units_y, sobra_x, sobra_y = generator.calculate_grid_from_drawer(drawer_x, drawer_y)
         tiles = generator.calculate_tiling_strategy(units_x, units_y)
         needs_tiling = generator.needs_tiling(units_x, units_y)
         
@@ -255,8 +256,19 @@ def main():
         
         total_width = units_x * GRID_UNIT
         total_depth = units_y * GRID_UNIT
+        spacer_x = sobra_x / 2
+        spacer_y = sobra_y / 2
         
-        col_info1, col_info2, col_info3 = st.columns(3)
+        # Calcula limite máximo de espaçador baseado no maior tile
+        max_tile_size = max(max(t[2], t[3]) for t in tiles) if tiles else 4
+        max_spacer_allowed = A1_MINI_BUILD_VOLUME_X - (max_tile_size * GRID_UNIT) if optimize_a1_mini else 999
+        spacer_truncado = (spacer_x > max_spacer_allowed or spacer_y > max_spacer_allowed) and optimize_a1_mini
+        
+        # Aplica o limite
+        spacer_x_efetivo = min(spacer_x, max_spacer_allowed) if optimize_a1_mini else spacer_x
+        spacer_y_efetivo = min(spacer_y, max_spacer_allowed) if optimize_a1_mini else spacer_y
+        
+        col_info1, col_info2, col_info3, col_info4 = st.columns(4)
         
         with col_info1:
             st.metric("Grid Calculado", f"{units_x} × {units_y} unidades")
@@ -266,6 +278,32 @@ def main():
         
         with col_info3:
             st.metric("Peças a Gerar", len(tiles))
+        
+        with col_info4:
+            if spacer_x_efetivo > 0 or spacer_y_efetivo > 0:
+                st.metric("Espaçadores", f"{spacer_x_efetivo:.1f} × {spacer_y_efetivo:.1f}mm")
+            else:
+                st.metric("Espaçadores", "Nenhum")
+        
+        # Info sobre espaçadores
+        if spacer_x_efetivo > 0 or spacer_y_efetivo > 0:
+            if spacer_truncado:
+                st.markdown(f"""
+                <div class="warning-box" style="padding: 10px; border-left: 4px solid #f0ad4e; background: #fcf8e3; margin: 10px 0;">
+                    <strong>⚠️ Espaçador Limitado:</strong><br>
+                    O espaçador ideal seria <strong>{spacer_x:.1f}mm × {spacer_y:.1f}mm</strong>, mas foi reduzido para 
+                    <strong>{spacer_x_efetivo:.1f}mm × {spacer_y_efetivo:.1f}mm</strong> para caber na cama da A1 Mini (180mm).
+                    O baseplate ficará ligeiramente descentrado.
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="success-box">
+                    <strong>📐 Centralização Automática:</strong><br>
+                    Serão adicionadas abas de <strong>{spacer_x_efetivo:.1f}mm</strong> (esq/dir) e <strong>{spacer_y_efetivo:.1f}mm</strong> (cima/baixo) 
+                    para travar o baseplate no centro da gaveta.
+                </div>
+                """, unsafe_allow_html=True)
         
         # Descrição da estratégia
         if needs_tiling and optimize_a1_mini:
@@ -293,36 +331,72 @@ def main():
         # Botão de geração
         st.divider()
         
-        # Opção de conectores Refined
-        include_connectors = st.checkbox(
-            "🔗 Incluir conectores Refined",
-            value=True,
-            help="Gera clips para unir as peças do baseplate (recomendado se dividido)"
-        )
+        # Info sobre sistema Dovetail
+        if needs_tiling and optimize_a1_mini:
+            st.markdown("""
+            <div class="info-box">
+                <strong>🔗 Sistema de Encaixe Dovetail:</strong><br>
+                As peças serão geradas com encaixes tipo "rabo de andorinha" integrados.
+                Basta imprimir e encaixar - sem clipes extras necessários!
+            </div>
+            """, unsafe_allow_html=True)
         
         if st.button("🔧 Gerar Baseplate", key="gen_baseplate", type="primary"):
             with st.spinner("Gerando geometria 3D... Isso pode levar alguns segundos."):
                 try:
-                    compound, _, _, tiles_result, num_connectors = generator.generate_from_drawer(
-                        drawer_x, drawer_y, include_connectors=include_connectors
+                    compound, _, _, tiles_result, _ = generator.generate_from_drawer(
+                        drawer_x, drawer_y
                     )
                     
                     # Gera resumo
-                    summary = generator.get_generation_summary(units_x, units_y, tiles_result, num_connectors)
-                    
-                    # Exporta para STL
-                    stl_bytes = export_to_stl_bytes(compound)
+                    summary = generator.get_generation_summary(units_x, units_y, tiles_result, 0)
                     
                     st.success(f"✅ {summary}")
-                    st.info(f"📁 Tamanho do arquivo: {get_file_size_str(len(stl_bytes))}")
                     
-                    # Botão de download
-                    st.download_button(
-                        label="⬇️ Download STL",
-                        data=stl_bytes,
-                        file_name="baseplate_full_set_a1mini.stl",
-                        mime="application/octet-stream"
-                    )
+                    # Se há múltiplas peças, oferece download individual (melhor para alinhamento)
+                    if len(tiles_result) > 1:
+                        st.markdown("""
+                        <div class="info-box">
+                            <strong>💡 Dica para Bambu Studio:</strong><br>
+                            Use o <strong>ZIP Individual</strong> para importar cada peça separadamente.
+                            Cada arquivo está centrado na origem para facilitar o alinhamento automático.
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        col_dl1, col_dl2 = st.columns(2)
+                        
+                        with col_dl1:
+                            # ZIP com peças individuais (recomendado)
+                            zip_bytes = create_individual_parts_zip(compound, "baseplate")
+                            st.download_button(
+                                label="⬇️ ZIP Individual (Recomendado)",
+                                data=zip_bytes,
+                                file_name="baseplate_individual_parts.zip",
+                                mime="application/zip",
+                                help="Cada peça em arquivo separado, centrada na origem"
+                            )
+                        
+                        with col_dl2:
+                            # STL único com tudo junto
+                            stl_bytes = export_to_stl_bytes(compound)
+                            st.download_button(
+                                label="⬇️ STL Único (Tudo junto)",
+                                data=stl_bytes,
+                                file_name="baseplate_full_set.stl",
+                                mime="application/octet-stream",
+                                help="Todas as peças em um único arquivo"
+                            )
+                    else:
+                        # Peça única - download direto
+                        stl_bytes = export_to_stl_bytes(compound)
+                        st.info(f"📁 Tamanho do arquivo: {get_file_size_str(len(stl_bytes))}")
+                        
+                        st.download_button(
+                            label="⬇️ Download STL",
+                            data=stl_bytes,
+                            file_name="baseplate.stl",
+                            mime="application/octet-stream"
+                        )
                 except Exception as e:
                     st.error(f"❌ Erro ao gerar baseplate: {str(e)}")
     
@@ -385,7 +459,6 @@ def main():
         
         with col_opt1:
             with_label = st.checkbox("🏷️ Área para etiqueta", value=False)
-            with_scoop = st.checkbox("🥄 Rampa (scoop)", value=False)
         
         with col_opt2:
             with_dividers = st.checkbox("➕ Divisórias internas", value=False)
@@ -425,8 +498,7 @@ def main():
                     else:
                         bin_part = bin_gen.generate_bin(
                             bin_x, bin_y, bin_height,
-                            with_label=with_label,
-                            with_scoop=with_scoop
+                            with_label=with_label
                         )
                     
                     stl_bytes = export_to_stl_bytes(bin_part)
@@ -558,6 +630,128 @@ EXPOSE 8501
 
 # Comando de execução
 CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+
+
+
+================================================
+FILE: generate_test_connectors.py
+================================================
+"""
+Gera peças de teste para validar o encaixe Dovetail (Rabo de Andorinha).
+Cria dois mini baseplates 1x1 com conectores macho e fêmea.
+"""
+
+from build123d import *
+
+# Constantes do Gridfinity
+GRID_UNIT = 42.0
+BASEPLATE_HEIGHT = 4.65
+BASEPLATE_CORNER_RADIUS = 3.75
+
+# Constantes do Dovetail
+DOVETAIL_DEPTH = 2.0
+DOVETAIL_WIDTH_MAX = 6.0
+DOVETAIL_WIDTH_MIN = 4.0
+DOVETAIL_TOLERANCE = 0.20
+
+
+def create_dovetail_solid(height: float, tolerance: float = 0.0):
+    """Cria o sólido do conector dovetail."""
+    depth = DOVETAIL_DEPTH
+    width_max = DOVETAIL_WIDTH_MAX
+    width_min = DOVETAIL_WIDTH_MIN
+    
+    w_max = width_max + tolerance
+    w_min = width_min + tolerance
+    d = depth + tolerance
+    
+    connector_height = height / 2  # Meia altura
+    start_x = -0.5 if tolerance > 0 else 0
+    
+    with BuildPart() as dovetail:
+        with BuildSketch(Plane.XY):
+            with BuildLine():
+                pts = [
+                    (start_x, -w_min/2),
+                    (start_x, w_min/2),
+                    (start_x + d, w_max/2),
+                    (start_x + d, -w_max/2),
+                    (start_x, -w_min/2)
+                ]
+                Polyline(pts)
+            make_face()
+        extrude(amount=connector_height)
+    
+    return dovetail.part
+
+
+def create_test_piece_male():
+    """Cria peça de teste 1x1 com conector MACHO na direita."""
+    grid_size = GRID_UNIT
+    
+    with BuildPart() as piece:
+        # Base 1x1
+        with BuildSketch(Plane.XY):
+            RectangleRounded(grid_size, grid_size, BASEPLATE_CORNER_RADIUS)
+        extrude(amount=BASEPLATE_HEIGHT)
+        
+        # Conector macho na borda direita
+        male = create_dovetail_solid(BASEPLATE_HEIGHT, tolerance=0.0)
+        male = male.move(Location((grid_size/2, 0, 0)))
+        add(male, mode=Mode.ADD)
+    
+    return piece.part
+
+
+def create_test_piece_female():
+    """Cria peça de teste 1x1 com conector FÊMEA na esquerda."""
+    grid_size = GRID_UNIT
+    
+    with BuildPart() as piece:
+        # Base 1x1
+        with BuildSketch(Plane.XY):
+            RectangleRounded(grid_size, grid_size, BASEPLATE_CORNER_RADIUS)
+        extrude(amount=BASEPLATE_HEIGHT)
+        
+        # Conector fêmea na borda esquerda
+        female = create_dovetail_solid(BASEPLATE_HEIGHT, tolerance=DOVETAIL_TOLERANCE)
+        female = female.move(Location((-grid_size/2, 0, 0)))
+        add(female, mode=Mode.SUBTRACT)
+    
+    return piece.part
+
+
+if __name__ == "__main__":
+    print("Gerando peças de teste do encaixe Dovetail...")
+    print(f"  Tolerância fêmea: {DOVETAIL_TOLERANCE}mm")
+    print(f"  Profundidade: {DOVETAIL_DEPTH}mm")
+    print(f"  Largura: {DOVETAIL_WIDTH_MIN}mm → {DOVETAIL_WIDTH_MAX}mm")
+    print()
+    
+    # Gera as peças
+    male_piece = create_test_piece_male()
+    female_piece = create_test_piece_female()
+    
+    # Exporta STLs usando export_stl do build123d
+    from build123d import export_stl
+    
+    export_stl(male_piece, "test_connector_MALE.stl")
+    print("✅ Exportado: test_connector_MALE.stl")
+    
+    export_stl(female_piece, "test_connector_FEMALE.stl")
+    print("✅ Exportado: test_connector_FEMALE.stl")
+    
+    print()
+    print("📐 Dimensões de cada peça:")
+    print(f"   Base: {GRID_UNIT}x{GRID_UNIT}mm")
+    print(f"   Altura: {BASEPLATE_HEIGHT}mm")
+    print(f"   Conector: meia altura ({BASEPLATE_HEIGHT/2:.2f}mm)")
+    print()
+    print("🔧 Para testar:")
+    print("   1. Imprima ambos os STLs")
+    print("   2. Encaixe o MACHO no FÊMEA deslizando lateralmente")
+    print("   3. Se muito apertado: aumente DOVETAIL_TOLERANCE")
+    print("   4. Se muito solto: diminua DOVETAIL_TOLERANCE")
 
 
 
@@ -728,12 +922,12 @@ __all__ = [
 FILE: gridfinity/baseplate.py
 ================================================
 """
-Gerador de Baseplates Gridfinity - Versão Standalone (Sem dependências extras)
-Desenha a geometria "na mão" para garantir compatibilidade e controle total.
+Gerador de Baseplates Gridfinity com Travamento Dovetail (Rabo de Andorinha)
+Otimizado para Bambu Lab A1 Mini - Versão Standalone
 """
 
 from build123d import *
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from .constants import *
 
 class BasePlateGenerator:
@@ -741,101 +935,152 @@ class BasePlateGenerator:
         self.optimize_for_a1_mini = optimize_for_a1_mini
         self.max_units = A1_MINI_MAX_UNITS if optimize_for_a1_mini else 20
 
-    # --- Lógica de Cálculo (Matemática) ---
+    # --- Lógica de Cálculo ---
 
-    def calculate_grid_from_drawer(self, drawer_x_mm: float, drawer_y_mm: float) -> Tuple[int, int]:
-        units_x = int(drawer_x_mm // GRID_UNIT)
-        units_y = int(drawer_y_mm // GRID_UNIT)
-        return max(1, units_x), max(1, units_y)
+    def calculate_grid_from_drawer(self, drawer_x_mm: float, drawer_y_mm: float) -> Tuple[int, int, float, float]:
+        """Calcula unidades e a sobra total em cada eixo."""
+        units_x = max(1, int(drawer_x_mm // GRID_UNIT))
+        units_y = max(1, int(drawer_y_mm // GRID_UNIT))
+        
+        # Sobra para espaçadores
+        sobra_x = drawer_x_mm - (units_x * GRID_UNIT)
+        sobra_y = drawer_y_mm - (units_y * GRID_UNIT)
+        
+        # Margem de segurança
+        if sobra_x > 1.0: sobra_x -= 0.5 
+        else: sobra_x = 0
+        if sobra_y > 1.0: sobra_y -= 0.5
+        else: sobra_y = 0
 
-    def calculate_tiling_strategy(self, total_x: int, total_y: int) -> List[Tuple[int, int, int, int]]:
+        return units_x, units_y, sobra_x, sobra_y
+
+    def calculate_tiling_strategy(self, total_x: int, total_y: int, spacer_x: float = 0, spacer_y: float = 0) -> List[Tuple[int, int, int, int]]:
+        """
+        Calcula a estratégia de divisão em tiles.
+        
+        IMPORTANTE: Considera spacers e conectores para garantir que cada peça caiba na mesa.
+        Fórmula do limite: grid + spacer + conector_macho ≤ 180mm
+        """
+        # Calcula max_units efetivo considerando spacers e conectores
+        # Peças de CANTO têm spacer de um lado + conector do outro
+        # Pior caso: spacer + grid + conector ≤ 180
+        max_spacer = max(spacer_x, spacer_y)
+        available_for_grid = A1_MINI_BUILD_VOLUME_X - max_spacer - self.DOVETAIL_DEPTH
+        effective_max_units = int(available_for_grid // GRID_UNIT)
+        effective_max_units = max(1, min(effective_max_units, self.max_units))
+        
         tiles = []
-        for x in range(0, total_x, self.max_units):
-            for y in range(0, total_y, self.max_units):
-                chunk_x = min(self.max_units, total_x - x)
-                chunk_y = min(self.max_units, total_y - y)
+        for x in range(0, total_x, effective_max_units):
+            for y in range(0, total_y, effective_max_units):
+                chunk_x = min(effective_max_units, total_x - x)
+                chunk_y = min(effective_max_units, total_y - y)
                 tiles.append((x, y, chunk_x, chunk_y))
         return tiles
 
-    # --- Geometria dos Conectores (Gridfinity Refined) ---
+    # --- Geometria do Dovetail (Rabo de Andorinha) ---
+    
+    # Constantes do conector (acessíveis para cálculos)
+    DOVETAIL_DEPTH = 2.0  # Profundidade do conector macho (quanto sai da peça)
 
-    def _get_connector_cutout_shape(self) -> Part:
-        """Cria o formato do BURACO do conector (fêmea)"""
-        middle_width = 6.0 / 2
-        middle_height = 3.0
-        thickness = 10.0 # Profundidade exagerada para garantir o corte
-        
-        with BuildPart() as part:
-            with BuildSketch() as sketch:
-                with BuildLine():
-                    l0 = Line((0, 0), (middle_width, 0))
-                    l1 = Line(l0 @ 1, (middle_width, middle_height))
-                    l2 = Line(l1 @ 1, ((l1 @ 1).X + 4, (l1 @ 1).Y + 3))
-                    l3 = Line(l2 @ 1, ((l2 @ 1).X, (l2 @ 1).Y + 3))
-                    Line(l3 @ 1, (0, (l3 @ 1).Y))
-                    mirror(about=Plane.YZ)
-                make_face()
-            extrude(sketch.sketch, thickness)
-            
-        # Rotaciona para ficar na orientação certa para cortar a lateral
-        return part.part
-
-    def _create_connector_clip(self) -> Part:
-        """Cria o CLIP físico (macho) para impressão"""
-        middle_width = 5.8 / 2
-        middle_height = 6.5 / 2
-        thickness = 2.8
-        chamfer_value = 0.4
-
-        with BuildPart() as part:
-            with BuildSketch() as sketch:
-                with BuildLine():
-                    l1 = Line((middle_width, 0), (middle_width, middle_height))
-                    l2 = Line(l1 @ 1, ((l1 @ 1).X + 3.9, (l1 @ 1).Y + 2.92))
-                    l3 = Line(l2 @ 1, ((l2 @ 1).X, (l2 @ 1).Y + 2.53))
-                    Line(l3 @ 1, (0, (l3 @ 1).Y))
-                    mirror(about=Plane.XZ)
-                    mirror(about=Plane.YZ)
-                make_face()
-            extrude(sketch.sketch, thickness)
-            try:
-                faces = [face.edges() for face in part.faces().filter_by(Axis.Z)]
-                chamfer(faces, chamfer_value)
-            except:
-                pass 
-        return part.part
-
-    # --- Geometria do Baseplate (Modo Verboso/Manual) ---
-
-    def _create_simple_baseplate(self, size_x: int, size_y: int, has_cutouts: dict) -> Part:
+    def _create_dovetail_solid(self, height: float, tolerance: float = 0.0) -> Part:
         """
-        Cria o baseplate manualmente (RectangleRounded + Extrude).
-        has_cutouts: dict indicando onde cortar {'top': bool, 'bottom': bool...}
-        """
-        width = size_x * GRID_UNIT
-        depth = size_y * GRID_UNIT
+        Cria o sólido 3D do rabo de andorinha (trapézio pequeno e discreto).
+        O conector é criado apontando para +X, com base em X=0.
         
-        # 1. Base Sólida
+        IMPORTANTE: O conector ocupa apenas METADE da altura (parte inferior).
+        Isso mantém a estrutura mais sólida e facilita a impressão.
+        
+        Args:
+            height: Altura TOTAL da peça (o conector usará metade)
+            tolerance: Folga adicional para o corte fêmea (0.0 para macho, 0.20 para fêmea)
+        
+        Dimensões otimizadas para FDM:
+        - Profundidade: 2.0mm (avanço)
+        - Largura na ponta: 6.0mm
+        - Largura no pescoço: 4.0mm
+        - Altura: metade da altura da peça
+        """
+        # Dimensões do Conector
+        depth = 2.0       # Profundidade (avanço)
+        width_max = 6.0   # Largura na ponta (maior)
+        width_min = 4.0   # Largura no pescoço (menor)
+        
+        # Aplica tolerância (aumenta o buraco fêmea)
+        w_max = width_max + tolerance
+        w_min = width_min + tolerance
+        d = depth + tolerance  # Fêmea um pouco mais funda também
+        
+        # MEIA ALTURA - conector só na parte inferior
+        connector_height = height / 2
+        
+        # Desenha o trapézio no plano XY, apontando para +X
+        # Para o FÊMEA funcionar, precisamos que a base comece um pouco ANTES da borda
+        start_x = -0.5 if tolerance > 0 else 0  # Fêmea começa 0.5mm antes
+        
+        with BuildPart() as dovetail:
+            with BuildSketch(Plane.XY):
+                with BuildLine():
+                    pts = [
+                        (start_x, -w_min/2),           # Base esquerda baixo
+                        (start_x, w_min/2),            # Base esquerda cima
+                        (start_x + d, w_max/2),        # Ponta cima
+                        (start_x + d, -w_max/2),       # Ponta baixo
+                        (start_x, -w_min/2)            # Fecha
+                    ]
+                    Polyline(pts)
+                make_face()
+            # Extrude apenas MEIA ALTURA (parte inferior, Z=0 até Z=height/2)
+            extrude(amount=connector_height)
+        
+        return dovetail.part
+
+    # --- Geometria do Baseplate ---
+
+    def _create_simple_baseplate(self, size_x: int, size_y: int, tiling_info: Dict, spacers: Dict) -> Part:
+        """
+        Gera o baseplate com conectores Dovetail nas bordas apropriadas.
+        
+        IMPORTANTE: Os conectores são gerados POR CÉLULA, não por placa!
+        Uma placa 4x4 terá 4 conectores em cada borda de interface.
+        
+        tiling_info: Diz se tem vizinho na {has_left, has_right, has_top, has_bottom}
+        """
+        grid_width = size_x * GRID_UNIT
+        grid_depth = size_y * GRID_UNIT
+        
+        # Dimensões totais com espaçadores
+        total_width = grid_width + spacers['left'] + spacers['right']
+        total_depth = grid_depth + spacers['top'] + spacers['bottom']
+        
+        # Ajuste do centro geométrico
+        center_offset_x = (spacers['right'] - spacers['left']) / 2
+        center_offset_y = (spacers['top'] - spacers['bottom']) / 2
+
+        # Altura do conector (mesma altura da base)
+        conn_height = BASEPLATE_HEIGHT
+
         with BuildPart() as base:
-            with BuildSketch():
-                RectangleRounded(width, depth, BASEPLATE_CORNER_RADIUS)
+            # 1. Base Sólida Principal
+            with BuildSketch(Plane.XY):
+                with Locations((center_offset_x, center_offset_y)):
+                    RectangleRounded(total_width, total_depth, BASEPLATE_CORNER_RADIUS)
             extrude(amount=BASEPLATE_HEIGHT)
 
-            # 2. Recortes dos "Squares" (onde a caixa encaixa)
-            # Desenhamos um perfil e subtraímos
+            # 2. Recortes Gridfinity (Padrão) + Conectores Dovetail POR CÉLULA
             for ix in range(size_x):
                 for iy in range(size_y):
-                    # Calcula posição
+                    # Centro desta célula (relativo ao centro do grid)
                     cx = (ix - (size_x - 1) / 2) * GRID_UNIT
                     cy = (iy - (size_y - 1) / 2) * GRID_UNIT
                     
-                    # Corte superior (o chanfro grande)
+                    # === Recortes Gridfinity (padrão) ===
+                    # Top Lip
                     with BuildSketch(Plane.XY.offset(BASEPLATE_HEIGHT)):
                         with Locations((cx, cy)):
                             RectangleRounded(GRID_UNIT - 0.5, GRID_UNIT - 0.5, BASEPLATE_CORNER_RADIUS - 0.25)
                     extrude(amount=-BASEPLATE_LIP_HEIGHT, mode=Mode.SUBTRACT)
 
-                    # Corte inferior (o quadrado interno)
+                    # Bottom Square
                     with BuildSketch(Plane.XY.offset(BASEPLATE_HEIGHT - BASEPLATE_LIP_HEIGHT)):
                         with Locations((cx, cy)):
                             RectangleRounded(
@@ -845,37 +1090,59 @@ class BasePlateGenerator:
                             )
                     extrude(amount=-(BASEPLATE_HEIGHT - BASEPLATE_LIP_HEIGHT), mode=Mode.SUBTRACT)
 
-            # 3. Adiciona os cortes laterais para conectores (Se necessário)
-            # A lógica aqui é posicionar o objeto de corte na borda correta e subtrair
-            cutout_tool = self._get_connector_cutout_shape()
-            
-            # Se tiver corte na direita (+X)
-            if has_cutouts.get('right'):
-                # Rotaciona para apontar para X
-                tool = cutout_tool.rotate(Axis.X, -90).rotate(Axis.Z, -90)
-                # Posiciona na borda direita
-                tool = tool.move(Location((width/2, 0, BASEPLATE_HEIGHT/2)))
-                add(tool, mode=Mode.SUBTRACT)
-
-            # Se tiver corte na esquerda (-X)
-            if has_cutouts.get('left'):
-                tool = cutout_tool.rotate(Axis.X, -90).rotate(Axis.Z, 90)
-                tool = tool.move(Location((-width/2, 0, BASEPLATE_HEIGHT/2)))
-                add(tool, mode=Mode.SUBTRACT)
-
-            # Se tiver corte em cima (+Y)
-            if has_cutouts.get('top'):
-                tool = cutout_tool.rotate(Axis.X, -90).rotate(Axis.Z, 180)
-                tool = tool.move(Location((0, depth/2, BASEPLATE_HEIGHT/2)))
-                add(tool, mode=Mode.SUBTRACT)
-
-            # Se tiver corte em baixo (-Y)
-            if has_cutouts.get('bottom'):
-                tool = cutout_tool.rotate(Axis.X, -90)
-                tool = tool.move(Location((0, -depth/2, BASEPLATE_HEIGHT/2)))
-                add(tool, mode=Mode.SUBTRACT)
+                    # === Conectores Dovetail POR CÉLULA ===
+                    # Regra de Polaridade:
+                    # - Direita (+X) e Cima (+Y): MACHO (Union)
+                    # - Esquerda (-X) e Baixo (-Y): FÊMEA (Subtract com tolerância)
+                    
+                    # --- BORDA DIREITA: Se esta célula está na última coluna E tem vizinho à direita ---
+                    if ix == (size_x - 1) and tiling_info.get('has_right'):
+                        male = self._create_dovetail_solid(conn_height, tolerance=0.0)
+                        # Posiciona na borda direita do grid, alinhado ao centro Y desta célula
+                        male = male.move(Location((grid_width/2, cy, 0)))
+                        add(male, mode=Mode.ADD)
+                    
+                    # --- BORDA ESQUERDA: Se esta célula está na primeira coluna E tem vizinho à esquerda ---
+                    if ix == 0 and tiling_info.get('has_left'):
+                        female = self._create_dovetail_solid(conn_height, tolerance=0.20)
+                        # O sólido aponta para +X. Para cortar na esquerda, precisamos que ele
+                        # ENTRE na peça vindo de fora. Posicionamos a BASE do trapézio na borda
+                        # e ele avança para DENTRO (+X).
+                        # Posição X: -grid_width/2 (borda esquerda, base do trapézio começa aqui)
+                        female = female.move(Location((-grid_width/2, cy, 0)))
+                        add(female, mode=Mode.SUBTRACT)
+                    
+                    # --- BORDA SUPERIOR: Se esta célula está na última linha E tem vizinho acima ---
+                    if iy == (size_y - 1) and tiling_info.get('has_top'):
+                        male = self._create_dovetail_solid(conn_height, tolerance=0.0)
+                        # Rotaciona 90° para apontar para +Y
+                        male = male.rotate(Axis.Z, 90)
+                        # Posiciona na borda superior, alinhado ao centro X desta célula
+                        male = male.move(Location((cx, grid_depth/2, 0)))
+                        add(male, mode=Mode.ADD)
+                    
+                    # --- BORDA INFERIOR: Se esta célula está na primeira linha E tem vizinho abaixo ---
+                    if iy == 0 and tiling_info.get('has_bottom'):
+                        female = self._create_dovetail_solid(conn_height, tolerance=0.20)
+                        # Rotaciona 90° para apontar para +Y (entrando na peça de baixo para cima)
+                        female = female.rotate(Axis.Z, 90)
+                        # Posiciona na borda inferior, alinhado ao centro X desta célula
+                        female = female.move(Location((cx, -grid_depth/2, 0)))
+                        add(female, mode=Mode.SUBTRACT)
 
         return base.part
+
+    def _center_part_on_origin(self, part: Part) -> Part:
+        """
+        Centraliza a peça na origem (0,0) para facilitar alinhamento no slicer.
+        O Z fica no chão (z=0).
+        """
+        bb = part.bounding_box()
+        center_x = (bb.min.X + bb.max.X) / 2
+        center_y = (bb.min.Y + bb.max.Y) / 2
+        min_z = bb.min.Z
+        
+        return part.move(Location((-center_x, -center_y, -min_z)))
 
     # --- Fluxo Principal ---
 
@@ -883,64 +1150,66 @@ class BasePlateGenerator:
         self, 
         drawer_x_mm: float, 
         drawer_y_mm: float, 
-        include_connectors: bool = True
+        include_connectors: bool = True,  # Mantido para compatibilidade (agora intrínseco)
+        center_on_origin: bool = True
     ) -> Tuple[Compound, int, int, List[Tuple[int, int, int, int]], int]:
         
-        # 1. Calcula Grid
-        units_x, units_y = self.calculate_grid_from_drawer(drawer_x_mm, drawer_y_mm)
+        # 1. Calcula Grid e Sobras
+        units_x, units_y, sobra_x, sobra_y = self.calculate_grid_from_drawer(drawer_x_mm, drawer_y_mm)
+        spacer_x = sobra_x / 2
+        spacer_y = sobra_y / 2
         
-        # 2. Define Tiles
-        tiles = self.calculate_tiling_strategy(units_x, units_y)
+        # 2. Define Tiles (passa spacers para cálculo correto do limite)
+        tiles = self.calculate_tiling_strategy(units_x, units_y, spacer_x, spacer_y)
         
         parts_export = []
-        spacing = A1_MINI_MAX_UNITS * GRID_UNIT + 10
+        spacing = A1_MINI_MAX_UNITS * GRID_UNIT + 20
 
         # 3. Gera cada Tile
         for idx, (pos_x, pos_y, size_x, size_y) in enumerate(tiles):
-            # Lógica para saber onde colocar furos de conector
-            # "Tenho alguém à minha direita?" -> Se (minha posição X + meu tamanho) < total X
-            has_right = (pos_x + size_x) < units_x
-            has_left = pos_x > 0
-            has_top = (pos_y + size_y) < units_y
-            has_bottom = pos_y > 0
-            
-            cutouts = {
-                'right': has_right,
-                'left': has_left,
-                'top': has_top,
-                'bottom': has_bottom
+            # Informação de Vizinhança (Tiling Info)
+            tiling_info = {
+                'has_right': (pos_x + size_x) < units_x,
+                'has_left': pos_x > 0,
+                'has_top': (pos_y + size_y) < units_y,
+                'has_bottom': pos_y > 0
+            }
+
+            # Spacers (Abas) - Só aplicados nas bordas externas que tocam a gaveta
+            my_spacers = {
+                'left': spacer_x if not tiling_info['has_left'] else 0,
+                'right': spacer_x if not tiling_info['has_right'] else 0,
+                'bottom': spacer_y if not tiling_info['has_bottom'] else 0,
+                'top': spacer_y if not tiling_info['has_top'] else 0
             }
 
             # Gera a peça
-            part = self._create_simple_baseplate(size_x, size_y, cutouts)
+            part = self._create_simple_baseplate(size_x, size_y, tiling_info, my_spacers)
             
-            # Posiciona para exportação (cria cópia independente)
-            loc_x = (idx % 3) * spacing
-            loc_y = (idx // 3) * spacing
-            part_copy = Part(part.wrapped).move(Location((loc_x, loc_y, 0)))
+            # Centraliza na origem se solicitado
+            if center_on_origin:
+                part = self._center_part_on_origin(part)
+            
+            # Posiciona para exportação (visualização explodida no slicer)
+            if len(tiles) > 1:
+                loc_x = (idx % 3) * spacing
+                loc_y = (idx // 3) * spacing
+                part_copy = Part(part.wrapped).move(Location((loc_x, loc_y, 0)))
+            else:
+                part_copy = Part(part.wrapped)
+            
             parts_export.append(part_copy)
 
-        # 4. Gera Clipes (Macho)
-        num_connectors = 0
-        if len(tiles) > 1 and include_connectors:
-            clip = self._create_connector_clip()
-            # Estimativa de clipes necessários (um pouco a mais por segurança)
-            num_connectors = len(tiles) * 2 
-            
-            for i in range(num_connectors):
-                # Cria cópia independente do conector
-                clip_copy = Part(clip.wrapped).move(Location((-50, i * 20, 0)))
-                parts_export.append(clip_copy)
-
-        return Compound(children=parts_export), units_x, units_y, tiles, num_connectors
-
-    def get_tiling_description(self, tiles):
-        if len(tiles) == 1:
-            return "Peça única."
-        return f"Dividido em {len(tiles)} partes."
+        # Retorna Compound (0 conectores avulsos, pois agora são integrados)
+        return Compound(children=parts_export), units_x, units_y, tiles, 0
 
     def get_generation_summary(self, ux, uy, tiles, n_conn):
-        return f"Grid {ux}x{uy} ({len(tiles)} partes + {n_conn} conectores)"
+        return f"Grid {ux}x{uy} ({len(tiles)} partes com encaixe Dovetail)"
+
+    def get_tiling_description(self, tiles):
+        if len(tiles) == 1: 
+            return "Peça única."
+        return f"Dividido em {len(tiles)} partes intertravadas."
 
     def needs_tiling(self, ux, uy):
         return ux > self.max_units or uy > self.max_units
@@ -1007,18 +1276,16 @@ class BinGenerator:
         units_y: int,
         height_units: int = 3,
         with_label: bool = False,
-        with_scoop: bool = False,
         wall_thickness: float = BIN_WALL_THICKNESS
     ) -> Part:
         """
-        Gera um bin Gridfinity.
+        Gera um bin Gridfinity com perfil de encaixe correto (por célula).
         
         Args:
             units_x: Número de unidades no eixo X
             units_y: Número de unidades no eixo Y
             height_units: Altura em unidades (1 unidade = 7mm)
             with_label: Adiciona área para etiqueta na frente
-            with_scoop: Adiciona rampa para facilitar pegar itens
             wall_thickness: Espessura da parede
             
         Returns:
@@ -1028,22 +1295,31 @@ class BinGenerator:
         depth = units_y * GRID_UNIT - 0.5
         height = height_units * GRID_HEIGHT_UNIT
         
+        internal_width = width - wall_thickness * 2
+        internal_depth = depth - wall_thickness * 2
+        
+        # Constantes do perfil de encaixe (lip) - baseado no padrão Gridfinity
+        # O perfil encaixa nos recortes do baseplate
+        lip_base_size = GRID_UNIT - 0.5  # 41.5mm - tamanho do recorte no baseplate
+        lip_inner_size = lip_base_size - BASEPLATE_LIP_WIDTH * 2  # Parte inferior do lip
+        lip_total_height = BASEPLATE_HEIGHT  # 4.65mm - altura total do lip
+        lip_step_height = BASEPLATE_LIP_HEIGHT  # 2.15mm - altura do degrau superior
+        
+        # Altura interna: do fundo (acima do lip + bottom) até o topo
+        internal_height = height - lip_total_height - BIN_BOTTOM_THICKNESS
+        
         with BuildPart() as bin_part:
-            # Corpo externo do bin
-            with BuildSketch():
+            # 1. Corpo externo do bin (começa ACIMA do lip)
+            with BuildSketch(Plane.XY.offset(lip_total_height)) as outer:
                 RectangleRounded(
                     width=width,
                     height=depth,
                     radius=BIN_CORNER_RADIUS
                 )
-            extrude(amount=height)
+            extrude(amount=height - lip_total_height)
             
-            # Cavidade interna
-            internal_width = width - wall_thickness * 2
-            internal_depth = depth - wall_thickness * 2
-            internal_height = height - BIN_BOTTOM_THICKNESS
-            
-            with BuildSketch(Plane.XY.offset(BIN_BOTTOM_THICKNESS)):
+            # 2. Cavidade interna
+            with BuildSketch(Plane.XY.offset(lip_total_height + BIN_BOTTOM_THICKNESS)) as inner:
                 RectangleRounded(
                     width=internal_width,
                     height=internal_depth,
@@ -1051,99 +1327,70 @@ class BinGenerator:
                 )
             extrude(amount=internal_height, mode=Mode.SUBTRACT)
             
-            # Lip (borda) para empilhamento
-            self._add_stacking_lip(bin_part, width, depth, height)
+            # 3. Lip (borda superior) para empilhamento
+            lip_outer = BIN_LIP_WIDTH  # 2.6mm
+            lip_height = BIN_LIP_HEIGHT  # 4.4mm
             
-            # Base com perfil de encaixe no baseplate
-            self._add_base_profile(bin_part, width, depth)
+            with BuildSketch(Plane.XY.offset(height)) as lip:
+                RectangleRounded(
+                    width=width,
+                    height=depth,
+                    radius=BIN_CORNER_RADIUS
+                )
+                RectangleRounded(
+                    width=width - lip_outer * 2,
+                    height=depth - lip_outer * 2,
+                    radius=BIN_CORNER_RADIUS - lip_outer,
+                    mode=Mode.SUBTRACT
+                )
+            extrude(amount=-lip_height, mode=Mode.SUBTRACT)
             
-            # Recursos opcionais
-            if with_scoop:
-                self._add_scoop(bin_part, internal_width, internal_depth, internal_height)
+            # 4. PERFIS DE ENCAIXE NO BASEPLATE (por célula!)
+            # Cada célula do bin precisa de seu próprio perfil que encaixa no baseplate
+            for ix in range(units_x):
+                for iy in range(units_y):
+                    # Centro desta célula (relativo ao centro do bin)
+                    cx = (ix - (units_x - 1) / 2) * GRID_UNIT
+                    cy = (iy - (units_y - 1) / 2) * GRID_UNIT
+                    
+                    # Parte SUPERIOR do lip (degrau) - encaixa no recorte superior do baseplate
+                    # Tamanho: 41.5mm, altura: do topo (4.65mm) descendo 2.15mm
+                    with BuildSketch(Plane.XY.offset(lip_total_height)):
+                        with Locations((cx, cy)):
+                            RectangleRounded(
+                                lip_base_size,
+                                lip_base_size,
+                                BASEPLATE_CORNER_RADIUS - 0.25
+                            )
+                    extrude(amount=-lip_step_height)
+                    
+                    # Parte INFERIOR do lip (base mais estreita) - encaixa no recorte inferior
+                    # Tamanho: 41.5 - 1.6 = 39.9mm, altura: 4.65 - 2.15 = 2.5mm
+                    with BuildSketch(Plane.XY.offset(lip_total_height - lip_step_height)):
+                        with Locations((cx, cy)):
+                            RectangleRounded(
+                                lip_inner_size,
+                                lip_inner_size,
+                                BASEPLATE_CORNER_RADIUS - 0.5
+                            )
+                    extrude(amount=-(lip_total_height - lip_step_height))
             
+            # 5. Recursos opcionais - Label (etiqueta)
             if with_label:
-                self._add_label_area(bin_part, width, height)
+                label_width = width * 0.8
+                label_height = 12  # mm
+                label_depth = 0.6  # profundidade do rebaixo
+                
+                with BuildSketch(Plane.XZ.offset(-depth / 2)) as label:
+                    with Locations([(0, height - label_height / 2 - 2)]):
+                        RectangleRounded(
+                            width=label_width,
+                            height=label_height,
+                            radius=1.5
+                        )
+                extrude(amount=label_depth, mode=Mode.SUBTRACT)
         
         return bin_part.part
-    
-    def _add_stacking_lip(
-        self,
-        builder,
-        width: float,
-        depth: float,
-        height: float
-    ):
-        """Adiciona lip para empilhamento."""
-        lip_outer = 2.6
-        lip_height = 4.4
-        
-        with BuildSketch(Plane.XY.offset(height)):
-            RectangleRounded(
-                width=width,
-                height=depth,
-                radius=BIN_CORNER_RADIUS
-            )
-            RectangleRounded(
-                width=width - lip_outer * 2,
-                height=depth - lip_outer * 2,
-                radius=BIN_CORNER_RADIUS - lip_outer,
-                mode=Mode.SUBTRACT
-            )
-        extrude(amount=-lip_height, mode=Mode.SUBTRACT)
-    
-    def _add_base_profile(self, builder, width: float, depth: float):
-        """Adiciona perfil de encaixe na base para conectar ao baseplate."""
-        # Chanfro na base para encaixe suave
-        base_inset = 0.8
-        base_height = 4.65
-        
-        with BuildSketch(Plane.XY):
-            RectangleRounded(
-                width=width,
-                height=depth,
-                radius=BIN_CORNER_RADIUS
-            )
-            RectangleRounded(
-                width=width - base_inset * 2,
-                height=depth - base_inset * 2,
-                radius=BIN_CORNER_RADIUS - base_inset,
-                mode=Mode.SUBTRACT
-            )
-        extrude(amount=base_height, mode=Mode.SUBTRACT)
-    
-    def _add_scoop(
-        self,
-        builder,
-        internal_width: float,
-        internal_depth: float,
-        internal_height: float
-    ):
-        """Adiciona rampa (scoop) para facilitar pegar itens."""
-        scoop_depth = internal_depth * 0.3
-        
-        with BuildSketch(Plane.XZ.offset(-internal_depth / 2 + BIN_WALL_THICKNESS)):
-            with Locations([(0, BIN_BOTTOM_THICKNESS + internal_height / 4)]):
-                Ellipse(
-                    x_radius=internal_width / 3,
-                    y_radius=internal_height / 3
-                )
-        extrude(amount=scoop_depth, mode=Mode.SUBTRACT)
-    
-    def _add_label_area(self, builder, width: float, height: float):
-        """Adiciona área inclinada para etiqueta na frente."""
-        label_width = width * 0.8
-        label_height = 12  # mm
-        label_depth = 0.6  # profundidade do rebaixo
-        
-        # Área rebaixada para etiqueta
-        with BuildSketch(Plane.XZ.offset(-width / 2)):
-            with Locations([(0, height - label_height / 2 - 2)]):
-                RectangleRounded(
-                    width=label_width,
-                    height=label_height,
-                    radius=1.5
-                )
-        extrude(amount=label_depth, mode=Mode.SUBTRACT)
     
     def generate_divider_bin(
         self,
@@ -1175,7 +1422,12 @@ class BinGenerator:
         
         internal_width = width - BIN_WALL_THICKNESS * 2
         internal_depth = depth - BIN_WALL_THICKNESS * 2
-        internal_height = height - BIN_BOTTOM_THICKNESS
+        
+        # Altura das divisórias: mesma altura da cavidade interna
+        # Fundo = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS = 5.45mm
+        # Topo = height (mesmo da cavidade, que vai até o topo do bin)
+        divider_base_z = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS
+        divider_height = height - divider_base_z  # Igual à cavidade interna
         
         divider_thickness = 1.0  # mm
         
@@ -1183,13 +1435,18 @@ class BinGenerator:
             add(base_bin)
             
             # Divisórias no eixo X
+            # Usamos Plane.YZ no offset X, o retângulo tem (largura_Y, altura_Z)
             if divisions_x > 1:
                 cell_width = internal_width / divisions_x
                 for i in range(1, divisions_x):
                     x_pos = -internal_width / 2 + cell_width * i
+                    # Desenha na base Z e extrude para cima
                     with BuildSketch(Plane.YZ.offset(x_pos)):
-                        Rectangle(internal_depth, internal_height)
-                    extrude(amount=divider_thickness, both=True)
+                        # Centro do retângulo no meio da altura da divisória
+                        center_z = divider_base_z + divider_height / 2
+                        with Locations((0, center_z)):
+                            Rectangle(internal_depth, divider_height)
+                    extrude(amount=divider_thickness / 2, both=True)
             
             # Divisórias no eixo Y
             if divisions_y > 1:
@@ -1197,8 +1454,10 @@ class BinGenerator:
                 for i in range(1, divisions_y):
                     y_pos = -internal_depth / 2 + cell_depth * i
                     with BuildSketch(Plane.XZ.offset(y_pos)):
-                        Rectangle(internal_width, internal_height)
-                    extrude(amount=divider_thickness, both=True)
+                        center_z = divider_base_z + divider_height / 2
+                        with Locations((0, center_z)):
+                            Rectangle(internal_width, divider_height)
+                    extrude(amount=divider_thickness / 2, both=True)
         
         return bin_with_dividers.part
 
@@ -1322,6 +1581,71 @@ def get_file_size_str(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.1f} KB"
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def export_parts_individually(
+    compound: Compound,
+    base_filename: str = "baseplate"
+) -> List[Tuple[str, bytes]]:
+    """
+    Exporta cada peça de um Compound como STL individual.
+    Cada peça é centrada na origem (0,0,0) para facilitar alinhamento no slicer.
+    
+    Args:
+        compound: Compound contendo múltiplas Parts
+        base_filename: Nome base para os arquivos (ex: "baseplate" -> "baseplate_1.stl")
+        
+    Returns:
+        Lista de tuplas (nome_arquivo, bytes_stl)
+    """
+    from build123d import Location
+    
+    parts = []
+    children = list(compound.solids())
+    
+    for i, solid in enumerate(children, 1):
+        # Centraliza cada peça na origem
+        bb = solid.bounding_box()
+        center_x = (bb.min.X + bb.max.X) / 2
+        center_y = (bb.min.Y + bb.max.Y) / 2
+        min_z = bb.min.Z
+        
+        # Move para centro em XY e Z=0
+        centered = solid.move(Location((-center_x, -center_y, -min_z)))
+        
+        # Exporta
+        stl_bytes = export_to_stl_bytes(centered)
+        filename = f"{base_filename}_{i}.stl"
+        parts.append((filename, stl_bytes))
+    
+    return parts
+
+
+def create_individual_parts_zip(
+    compound: Compound,
+    base_filename: str = "baseplate"
+) -> bytes:
+    """
+    Cria ZIP com cada peça exportada individualmente e centrada.
+    Ideal para importar no slicer com alinhamento automático.
+    
+    Args:
+        compound: Compound com múltiplas peças
+        base_filename: Nome base para os arquivos
+        
+    Returns:
+        Bytes do arquivo ZIP
+    """
+    zip_buffer = io.BytesIO()
+    
+    parts = export_parts_individually(compound, base_filename)
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for filename, stl_bytes in parts:
+            zf.writestr(filename, stl_bytes)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
 
 
 
