@@ -40,6 +40,29 @@ class BasePlateGenerator:
         else: sobra_y = 0
 
         return units_x, units_y, sobra_x, sobra_y
+    
+    def _calculate_max_spacer_for_tile(self, tile_size: int) -> float:
+        """
+        Calcula o espaçador máximo que um tile pode ter sem exceder a cama da A1 Mini.
+        tile_size: tamanho do tile em unidades (ex: 4)
+        Retorna: espaçador máximo por lado em mm
+        """
+        if not self.optimize_for_a1_mini:
+            return 999.0  # Sem limite se não otimizar para A1 Mini
+        
+        # Tamanho do grid em mm
+        grid_size_mm = tile_size * GRID_UNIT
+        
+        # Espaço restante na cama
+        # O tile pode ter espaçador em ambos os lados (esq+dir ou cima+baixo)
+        espaco_restante = A1_MINI_BUILD_VOLUME_X - grid_size_mm
+        
+        # Divide por 2 porque o espaçador pode estar em ambos os lados
+        # Mas como cada tile só tem espaçador em UM lado (ou nenhum), o máximo é o total
+        # Ex: tile de 4 unidades (168mm), sobram 12mm -> max 12mm de espaçador num lado
+        max_spacer = max(0, espaco_restante)
+        
+        return max_spacer
 
     def calculate_tiling_strategy(self, total_x: int, total_y: int) -> List[Tuple[int, int, int, int]]:
         tiles = []
@@ -177,13 +200,27 @@ class BasePlateGenerator:
 
         return base.part
 
+    def _center_part_on_origin(self, part: Part) -> Part:
+        """
+        Centraliza a peça na origem (0,0) para facilitar alinhamento no slicer.
+        O Z fica no chão (z=0).
+        """
+        bb = part.bounding_box()
+        center_x = (bb.min.X + bb.max.X) / 2
+        center_y = (bb.min.Y + bb.max.Y) / 2
+        min_z = bb.min.Z
+        
+        # Move para que o centro XY fique em (0,0) e o fundo fique em Z=0
+        return part.move(Location((-center_x, -center_y, -min_z)))
+
     # --- Fluxo Principal ---
 
     def generate_from_drawer(
         self, 
         drawer_x_mm: float, 
         drawer_y_mm: float, 
-        include_connectors: bool = True
+        include_connectors: bool = True,
+        center_on_origin: bool = True
     ) -> Tuple[Compound, int, int, List[Tuple[int, int, int, int]], int]:
         
         # 1. Calcula Grid e Sobras
@@ -214,24 +251,43 @@ class BasePlateGenerator:
                 'bottom': has_bottom
             }
 
+            # === LIMITAÇÃO CRÍTICA: Espaçador + Tile ≤ 180mm (A1 Mini) ===
+            # Calcula o máximo de espaçador que cabe com este tile
+            max_spacer_x = self._calculate_max_spacer_for_tile(size_x)
+            max_spacer_y = self._calculate_max_spacer_for_tile(size_y)
+
             # Lógica de Espaçadores (quem toca a borda da gaveta?)
             # Se eu estou na borda esquerda (x=0), recebo o spacer_x na esquerda
+            # MAS limitado ao máximo que cabe na cama
             my_spacers = {
-                'left': spacer_x if pos_x == 0 else 0,
-                'right': spacer_x if (pos_x + size_x) == units_x else 0,
-                'bottom': spacer_y if pos_y == 0 else 0,
-                'top': spacer_y if (pos_y + size_y) == units_y else 0
+                'left': min(spacer_x, max_spacer_x) if pos_x == 0 else 0,
+                'right': min(spacer_x, max_spacer_x) if (pos_x + size_x) == units_x else 0,
+                'bottom': min(spacer_y, max_spacer_y) if pos_y == 0 else 0,
+                'top': min(spacer_y, max_spacer_y) if (pos_y + size_y) == units_y else 0
             }
+            
+            # Aviso se truncou espaçador (pode ser útil para o usuário)
+            truncado_x = spacer_x > max_spacer_x
+            truncado_y = spacer_y > max_spacer_y
+            if truncado_x or truncado_y:
+                print(f"⚠️ Tile {idx+1}: Espaçador truncado para caber na cama (max X:{max_spacer_x:.1f}mm, Y:{max_spacer_y:.1f}mm)")
 
             # Gera a peça com os espaçadores específicos
             part = self._create_simple_baseplate(size_x, size_y, cutouts, my_spacers)
             
-            # Posiciona para exportação
-            loc_x = (idx % 3) * spacing
-            loc_y = (idx // 3) * spacing
+            # Centraliza na origem se solicitado
+            if center_on_origin:
+                part = self._center_part_on_origin(part)
             
-            # Adiciona cópia independente
-            part_copy = Part(part.wrapped).move(Location((loc_x, loc_y, 0)))
+            # Posiciona para exportação (quando há múltiplas peças)
+            if len(tiles) > 1:
+                loc_x = (idx % 3) * spacing
+                loc_y = (idx // 3) * spacing
+                part_copy = Part(part.wrapped).move(Location((loc_x, loc_y, 0)))
+            else:
+                # Peça única fica centrada na origem
+                part_copy = Part(part.wrapped)
+            
             parts_export.append(part_copy)
 
         # 4. Gera Clipes (Macho)

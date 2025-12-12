@@ -15,8 +15,8 @@ from typing import List, Tuple
 try:
     from build123d import Compound, Part, export_stl
     from gridfinity import BasePlateGenerator, BinGenerator
-    from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT
-    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str
+    from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT, A1_MINI_BUILD_VOLUME_X
+    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str, create_individual_parts_zip
     BUILD123D_AVAILABLE = True
 except ImportError as e:
     BUILD123D_AVAILABLE = False
@@ -185,6 +185,15 @@ def main():
         spacer_x = sobra_x / 2
         spacer_y = sobra_y / 2
         
+        # Calcula limite máximo de espaçador baseado no maior tile
+        max_tile_size = max(max(t[2], t[3]) for t in tiles) if tiles else 4
+        max_spacer_allowed = A1_MINI_BUILD_VOLUME_X - (max_tile_size * GRID_UNIT) if optimize_a1_mini else 999
+        spacer_truncado = (spacer_x > max_spacer_allowed or spacer_y > max_spacer_allowed) and optimize_a1_mini
+        
+        # Aplica o limite
+        spacer_x_efetivo = min(spacer_x, max_spacer_allowed) if optimize_a1_mini else spacer_x
+        spacer_y_efetivo = min(spacer_y, max_spacer_allowed) if optimize_a1_mini else spacer_y
+        
         col_info1, col_info2, col_info3, col_info4 = st.columns(4)
         
         with col_info1:
@@ -197,20 +206,30 @@ def main():
             st.metric("Peças a Gerar", len(tiles))
         
         with col_info4:
-            if spacer_x > 0 or spacer_y > 0:
-                st.metric("Espaçadores", f"{spacer_x:.1f} × {spacer_y:.1f}mm")
+            if spacer_x_efetivo > 0 or spacer_y_efetivo > 0:
+                st.metric("Espaçadores", f"{spacer_x_efetivo:.1f} × {spacer_y_efetivo:.1f}mm")
             else:
                 st.metric("Espaçadores", "Nenhum")
         
         # Info sobre espaçadores
-        if spacer_x > 0 or spacer_y > 0:
-            st.markdown(f"""
-            <div class="success-box">
-                <strong>📐 Centralização Automática:</strong><br>
-                Serão adicionadas abas de <strong>{spacer_x:.1f}mm</strong> (esq/dir) e <strong>{spacer_y:.1f}mm</strong> (cima/baixo) 
-                para travar o baseplate no centro da gaveta.
-            </div>
-            """, unsafe_allow_html=True)
+        if spacer_x_efetivo > 0 or spacer_y_efetivo > 0:
+            if spacer_truncado:
+                st.markdown(f"""
+                <div class="warning-box" style="padding: 10px; border-left: 4px solid #f0ad4e; background: #fcf8e3; margin: 10px 0;">
+                    <strong>⚠️ Espaçador Limitado:</strong><br>
+                    O espaçador ideal seria <strong>{spacer_x:.1f}mm × {spacer_y:.1f}mm</strong>, mas foi reduzido para 
+                    <strong>{spacer_x_efetivo:.1f}mm × {spacer_y_efetivo:.1f}mm</strong> para caber na cama da A1 Mini (180mm).
+                    O baseplate ficará ligeiramente descentrado.
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="success-box">
+                    <strong>📐 Centralização Automática:</strong><br>
+                    Serão adicionadas abas de <strong>{spacer_x_efetivo:.1f}mm</strong> (esq/dir) e <strong>{spacer_y_efetivo:.1f}mm</strong> (cima/baixo) 
+                    para travar o baseplate no centro da gaveta.
+                </div>
+                """, unsafe_allow_html=True)
         
         # Descrição da estratégia
         if needs_tiling and optimize_a1_mini:
@@ -255,19 +274,52 @@ def main():
                     # Gera resumo
                     summary = generator.get_generation_summary(units_x, units_y, tiles_result, num_connectors)
                     
-                    # Exporta para STL
-                    stl_bytes = export_to_stl_bytes(compound)
-                    
                     st.success(f"✅ {summary}")
-                    st.info(f"📁 Tamanho do arquivo: {get_file_size_str(len(stl_bytes))}")
                     
-                    # Botão de download
-                    st.download_button(
-                        label="⬇️ Download STL",
-                        data=stl_bytes,
-                        file_name="baseplate_full_set_a1mini.stl",
-                        mime="application/octet-stream"
-                    )
+                    # Se há múltiplas peças, oferece download individual (melhor para alinhamento)
+                    if len(tiles_result) > 1:
+                        st.markdown("""
+                        <div class="info-box">
+                            <strong>💡 Dica para Bambu Studio:</strong><br>
+                            Use o <strong>ZIP Individual</strong> para importar cada peça separadamente.
+                            Cada arquivo está centrado na origem para facilitar o alinhamento automático.
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        col_dl1, col_dl2 = st.columns(2)
+                        
+                        with col_dl1:
+                            # ZIP com peças individuais (recomendado)
+                            zip_bytes = create_individual_parts_zip(compound, "baseplate")
+                            st.download_button(
+                                label="⬇️ ZIP Individual (Recomendado)",
+                                data=zip_bytes,
+                                file_name="baseplate_individual_parts.zip",
+                                mime="application/zip",
+                                help="Cada peça em arquivo separado, centrada na origem"
+                            )
+                        
+                        with col_dl2:
+                            # STL único com tudo junto
+                            stl_bytes = export_to_stl_bytes(compound)
+                            st.download_button(
+                                label="⬇️ STL Único (Tudo junto)",
+                                data=stl_bytes,
+                                file_name="baseplate_full_set.stl",
+                                mime="application/octet-stream",
+                                help="Todas as peças em um único arquivo"
+                            )
+                    else:
+                        # Peça única - download direto
+                        stl_bytes = export_to_stl_bytes(compound)
+                        st.info(f"📁 Tamanho do arquivo: {get_file_size_str(len(stl_bytes))}")
+                        
+                        st.download_button(
+                            label="⬇️ Download STL",
+                            data=stl_bytes,
+                            file_name="baseplate.stl",
+                            mime="application/octet-stream"
+                        )
                 except Exception as e:
                     st.error(f"❌ Erro ao gerar baseplate: {str(e)}")
     

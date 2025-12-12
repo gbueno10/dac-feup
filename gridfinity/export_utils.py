@@ -75,3 +75,68 @@ def get_file_size_str(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.1f} KB"
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def export_parts_individually(
+    compound: Compound,
+    base_filename: str = "baseplate"
+) -> List[Tuple[str, bytes]]:
+    """
+    Exporta cada peça de um Compound como STL individual.
+    Cada peça é centrada na origem (0,0,0) para facilitar alinhamento no slicer.
+    
+    Args:
+        compound: Compound contendo múltiplas Parts
+        base_filename: Nome base para os arquivos (ex: "baseplate" -> "baseplate_1.stl")
+        
+    Returns:
+        Lista de tuplas (nome_arquivo, bytes_stl)
+    """
+    from build123d import Location
+    
+    parts = []
+    children = list(compound.solids())
+    
+    for i, solid in enumerate(children, 1):
+        # Centraliza cada peça na origem
+        bb = solid.bounding_box()
+        center_x = (bb.min.X + bb.max.X) / 2
+        center_y = (bb.min.Y + bb.max.Y) / 2
+        min_z = bb.min.Z
+        
+        # Move para centro em XY e Z=0
+        centered = solid.move(Location((-center_x, -center_y, -min_z)))
+        
+        # Exporta
+        stl_bytes = export_to_stl_bytes(centered)
+        filename = f"{base_filename}_{i}.stl"
+        parts.append((filename, stl_bytes))
+    
+    return parts
+
+
+def create_individual_parts_zip(
+    compound: Compound,
+    base_filename: str = "baseplate"
+) -> bytes:
+    """
+    Cria ZIP com cada peça exportada individualmente e centrada.
+    Ideal para importar no slicer com alinhamento automático.
+    
+    Args:
+        compound: Compound com múltiplas peças
+        base_filename: Nome base para os arquivos
+        
+    Returns:
+        Bytes do arquivo ZIP
+    """
+    zip_buffer = io.BytesIO()
+    
+    parts = export_parts_individually(compound, base_filename)
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for filename, stl_bytes in parts:
+            zf.writestr(filename, stl_bytes)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
