@@ -60,7 +60,7 @@ class BinGenerator:
         wall_thickness: float = BIN_WALL_THICKNESS
     ) -> Part:
         """
-        Gera um bin Gridfinity.
+        Gera um bin Gridfinity com perfil de encaixe correto (por célula).
         
         Args:
             units_x: Número de unidades no eixo X
@@ -81,18 +81,25 @@ class BinGenerator:
         internal_depth = depth - wall_thickness * 2
         internal_height = height - BIN_BOTTOM_THICKNESS
         
+        # Constantes do perfil de encaixe (lip) - baseado no padrão Gridfinity
+        # O perfil encaixa nos recortes do baseplate
+        lip_base_size = GRID_UNIT - 0.5  # 41.5mm - tamanho do recorte no baseplate
+        lip_inner_size = lip_base_size - BASEPLATE_LIP_WIDTH * 2  # Parte inferior do lip
+        lip_total_height = BASEPLATE_HEIGHT  # 4.65mm - altura total do lip
+        lip_step_height = BASEPLATE_LIP_HEIGHT  # 2.15mm - altura do degrau superior
+        
         with BuildPart() as bin_part:
-            # 1. Corpo externo do bin
-            with BuildSketch() as outer:
+            # 1. Corpo externo do bin (começa ACIMA do lip)
+            with BuildSketch(Plane.XY.offset(lip_total_height)) as outer:
                 RectangleRounded(
                     width=width,
                     height=depth,
                     radius=BIN_CORNER_RADIUS
                 )
-            extrude(amount=height)
+            extrude(amount=height - lip_total_height)
             
             # 2. Cavidade interna
-            with BuildSketch(Plane.XY.offset(BIN_BOTTOM_THICKNESS)) as inner:
+            with BuildSketch(Plane.XY.offset(lip_total_height + BIN_BOTTOM_THICKNESS)) as inner:
                 RectangleRounded(
                     width=internal_width,
                     height=internal_depth,
@@ -100,9 +107,9 @@ class BinGenerator:
                 )
             extrude(amount=internal_height, mode=Mode.SUBTRACT)
             
-            # 3. Lip (borda) para empilhamento
-            lip_outer = 2.6
-            lip_height = 4.4
+            # 3. Lip (borda superior) para empilhamento
+            lip_outer = BIN_LIP_WIDTH  # 2.6mm
+            lip_height = BIN_LIP_HEIGHT  # 4.4mm
             
             with BuildSketch(Plane.XY.offset(height)) as lip:
                 RectangleRounded(
@@ -118,29 +125,41 @@ class BinGenerator:
                 )
             extrude(amount=-lip_height, mode=Mode.SUBTRACT)
             
-            # 4. Base com perfil de encaixe no baseplate
-            base_inset = 0.8
-            base_height = 4.65
-            
-            with BuildSketch(Plane.XY) as base_profile:
-                RectangleRounded(
-                    width=width,
-                    height=depth,
-                    radius=BIN_CORNER_RADIUS
-                )
-                RectangleRounded(
-                    width=width - base_inset * 2,
-                    height=depth - base_inset * 2,
-                    radius=BIN_CORNER_RADIUS - base_inset,
-                    mode=Mode.SUBTRACT
-                )
-            extrude(amount=base_height, mode=Mode.SUBTRACT)
+            # 4. PERFIS DE ENCAIXE NO BASEPLATE (por célula!)
+            # Cada célula do bin precisa de seu próprio perfil que encaixa no baseplate
+            for ix in range(units_x):
+                for iy in range(units_y):
+                    # Centro desta célula (relativo ao centro do bin)
+                    cx = (ix - (units_x - 1) / 2) * GRID_UNIT
+                    cy = (iy - (units_y - 1) / 2) * GRID_UNIT
+                    
+                    # Parte SUPERIOR do lip (degrau) - encaixa no recorte superior do baseplate
+                    # Tamanho: 41.5mm, altura: do topo (4.65mm) descendo 2.15mm
+                    with BuildSketch(Plane.XY.offset(lip_total_height)):
+                        with Locations((cx, cy)):
+                            RectangleRounded(
+                                lip_base_size,
+                                lip_base_size,
+                                BASEPLATE_CORNER_RADIUS - 0.25
+                            )
+                    extrude(amount=-lip_step_height)
+                    
+                    # Parte INFERIOR do lip (base mais estreita) - encaixa no recorte inferior
+                    # Tamanho: 41.5 - 1.6 = 39.9mm, altura: 4.65 - 2.15 = 2.5mm
+                    with BuildSketch(Plane.XY.offset(lip_total_height - lip_step_height)):
+                        with Locations((cx, cy)):
+                            RectangleRounded(
+                                lip_inner_size,
+                                lip_inner_size,
+                                BASEPLATE_CORNER_RADIUS - 0.5
+                            )
+                    extrude(amount=-(lip_total_height - lip_step_height))
             
             # 5. Recursos opcionais - Scoop (rampa)
             if with_scoop:
                 scoop_depth = internal_depth * 0.3
                 with BuildSketch(Plane.XZ.offset(-internal_depth / 2 + wall_thickness)) as scoop:
-                    with Locations([(0, BIN_BOTTOM_THICKNESS + internal_height / 4)]):
+                    with Locations([(0, lip_total_height + BIN_BOTTOM_THICKNESS + internal_height / 4)]):
                         Ellipse(
                             x_radius=internal_width / 3,
                             y_radius=internal_height / 3
@@ -194,9 +213,12 @@ class BinGenerator:
         
         internal_width = width - BIN_WALL_THICKNESS * 2
         internal_depth = depth - BIN_WALL_THICKNESS * 2
-        internal_height = height - BIN_BOTTOM_THICKNESS
+        internal_height = height - BIN_BOTTOM_THICKNESS - BASEPLATE_HEIGHT  # Desconta o lip inferior
         
         divider_thickness = 1.0  # mm
+        
+        # Base Z das divisórias (acima do lip + fundo)
+        divider_base_z = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS
         
         with BuildPart() as bin_with_dividers:
             add(base_bin)
@@ -207,7 +229,7 @@ class BinGenerator:
                 for i in range(1, divisions_x):
                     x_pos = -internal_width / 2 + cell_width * i
                     with BuildSketch(Plane.YZ.offset(x_pos)):
-                        with Locations((0, BIN_BOTTOM_THICKNESS + internal_height / 2)):
+                        with Locations((0, divider_base_z + internal_height / 2)):
                             Rectangle(internal_depth, internal_height)
                     extrude(amount=divider_thickness / 2, both=True)
             
@@ -217,7 +239,7 @@ class BinGenerator:
                 for i in range(1, divisions_y):
                     y_pos = -internal_depth / 2 + cell_depth * i
                     with BuildSketch(Plane.XZ.offset(y_pos)):
-                        with Locations((0, BIN_BOTTOM_THICKNESS + internal_height / 2)):
+                        with Locations((0, divider_base_z + internal_height / 2)):
                             Rectangle(internal_width, internal_height)
                     extrude(amount=divider_thickness / 2, both=True)
         
