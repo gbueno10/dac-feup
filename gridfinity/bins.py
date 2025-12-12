@@ -56,7 +56,6 @@ class BinGenerator:
         units_y: int,
         height_units: int = 3,
         with_label: bool = False,
-        with_scoop: bool = False,
         wall_thickness: float = BIN_WALL_THICKNESS
     ) -> Part:
         """
@@ -67,7 +66,6 @@ class BinGenerator:
             units_y: Número de unidades no eixo Y
             height_units: Altura em unidades (1 unidade = 7mm)
             with_label: Adiciona área para etiqueta na frente
-            with_scoop: Adiciona rampa para facilitar pegar itens
             wall_thickness: Espessura da parede
             
         Returns:
@@ -155,18 +153,7 @@ class BinGenerator:
                             )
                     extrude(amount=-(lip_total_height - lip_step_height))
             
-            # 5. Recursos opcionais - Scoop (rampa)
-            if with_scoop:
-                scoop_depth = internal_depth * 0.3
-                with BuildSketch(Plane.XZ.offset(-internal_depth / 2 + wall_thickness)) as scoop:
-                    with Locations([(0, lip_total_height + BIN_BOTTOM_THICKNESS + internal_height / 4)]):
-                        Ellipse(
-                            x_radius=internal_width / 3,
-                            y_radius=internal_height / 3
-                        )
-                extrude(amount=scoop_depth, mode=Mode.SUBTRACT)
-            
-            # 6. Recursos opcionais - Label (etiqueta)
+            # 5. Recursos opcionais - Label (etiqueta)
             if with_label:
                 label_width = width * 0.8
                 label_height = 12  # mm
@@ -213,12 +200,14 @@ class BinGenerator:
         
         internal_width = width - BIN_WALL_THICKNESS * 2
         internal_depth = depth - BIN_WALL_THICKNESS * 2
-        internal_height = height - BIN_BOTTOM_THICKNESS - BASEPLATE_HEIGHT  # Desconta o lip inferior
+        
+        # Altura das divisórias: do fundo interno até o topo do bin
+        # Fundo interno = BASEPLATE_HEIGHT (lip) + BIN_BOTTOM_THICKNESS
+        # Topo = height (altura total)
+        divider_base_z = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS
+        divider_height = height - divider_base_z  # Altura até o topo
         
         divider_thickness = 1.0  # mm
-        
-        # Base Z das divisórias (acima do lip + fundo)
-        divider_base_z = BASEPLATE_HEIGHT + BIN_BOTTOM_THICKNESS
         
         with BuildPart() as bin_with_dividers:
             add(base_bin)
@@ -229,8 +218,8 @@ class BinGenerator:
                 for i in range(1, divisions_x):
                     x_pos = -internal_width / 2 + cell_width * i
                     with BuildSketch(Plane.YZ.offset(x_pos)):
-                        with Locations((0, divider_base_z + internal_height / 2)):
-                            Rectangle(internal_depth, internal_height)
+                        with Locations((0, divider_base_z + divider_height / 2)):
+                            Rectangle(internal_depth, divider_height)
                     extrude(amount=divider_thickness / 2, both=True)
             
             # Divisórias no eixo Y
@@ -239,8 +228,8 @@ class BinGenerator:
                 for i in range(1, divisions_y):
                     y_pos = -internal_depth / 2 + cell_depth * i
                     with BuildSketch(Plane.XZ.offset(y_pos)):
-                        with Locations((0, divider_base_z + internal_height / 2)):
-                            Rectangle(internal_width, internal_height)
+                        with Locations((0, divider_base_z + divider_height / 2)):
+                            Rectangle(internal_width, divider_height)
                     extrude(amount=divider_thickness / 2, both=True)
         
         return bin_with_dividers.part

@@ -385,7 +385,6 @@ def main():
         
         with col_opt1:
             with_label = st.checkbox("🏷️ Área para etiqueta", value=False)
-            with_scoop = st.checkbox("🥄 Rampa (scoop)", value=False)
         
         with col_opt2:
             with_dividers = st.checkbox("➕ Divisórias internas", value=False)
@@ -425,8 +424,7 @@ def main():
                     else:
                         bin_part = bin_gen.generate_bin(
                             bin_x, bin_y, bin_height,
-                            with_label=with_label,
-                            with_scoop=with_scoop
+                            with_label=with_label
                         )
                     
                     stl_bytes = export_to_stl_bytes(bin_part)
