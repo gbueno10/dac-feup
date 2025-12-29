@@ -135,11 +135,6 @@ def main():
         - **Altura da unidade:** {GRID_HEIGHT_UNIT}mm
         - **Limite A1 Mini:** {A1_MINI_MAX_UNITS}x{A1_MINI_MAX_UNITS} = {A1_MINI_MAX_UNITS * GRID_UNIT:.0f}mm
         """)
-        
-        # Status do sistema
-        st.divider()
-        st.header("📦 Status do Sistema")
-        st.success("✅ Sistema Gridfinity Standalone - Sem dependências externas")
     
     # Tabs principais
     tab_baseplate, tab_bins, tab_help = st.tabs(["🔲 Baseplate", "📦 Bins (Caixas)", "❓ Ajuda"])
@@ -174,7 +169,9 @@ def main():
         # Cálculos
         generator = BasePlateGenerator(optimize_for_a1_mini=optimize_a1_mini)
         units_x, units_y, sobra_x, sobra_y = generator.calculate_grid_from_drawer(drawer_x, drawer_y)
-        tiles = generator.calculate_tiling_strategy(units_x, units_y)
+        spacer_x = sobra_x / 2
+        spacer_y = sobra_y / 2
+        tiles = generator.calculate_tiling_strategy(units_x, units_y, spacer_x, spacer_y)
         needs_tiling = generator.needs_tiling(units_x, units_y)
         
         # Feedback visual
@@ -182,8 +179,6 @@ def main():
         
         total_width = units_x * GRID_UNIT
         total_depth = units_y * GRID_UNIT
-        spacer_x = sobra_x / 2
-        spacer_y = sobra_y / 2
         
         # Calcula limite máximo de espaçador baseado no maior tile
         max_tile_size = max(max(t[2], t[3]) for t in tiles) if tiles else 4
@@ -257,15 +252,6 @@ def main():
         # Botão de geração
         st.divider()
         
-        # Info sobre sistema Dovetail
-        if needs_tiling and optimize_a1_mini:
-            st.markdown("""
-            <div class="info-box">
-                <strong>🔗 Sistema de Encaixe Dovetail:</strong><br>
-                As peças serão geradas com encaixes tipo "rabo de andorinha" integrados.
-                Basta imprimir e encaixar - sem clipes extras necessários!
-            </div>
-            """, unsafe_allow_html=True)
         
         if st.button("🔧 Gerar Baseplate", key="gen_baseplate", type="primary"):
             with st.spinner("Gerando geometria 3D... Isso pode levar alguns segundos."):
