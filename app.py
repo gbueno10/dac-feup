@@ -16,7 +16,7 @@ try:
     from build123d import Compound, Part, export_stl
     from gridfinity import BasePlateGenerator, BinGenerator
     from gridfinity.constants import GRID_UNIT, A1_MINI_MAX_UNITS, GRID_HEIGHT_UNIT, A1_MINI_BUILD_VOLUME_X
-    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str, create_individual_parts_zip
+    from gridfinity.export_utils import create_download_zip, export_to_stl_bytes, get_file_size_str, create_individual_parts_zip, export_to_step_bytes
     BUILD123D_AVAILABLE = True
 except ImportError as e:
     BUILD123D_AVAILABLE = False
@@ -135,6 +135,11 @@ def main():
         - **Altura da unidade:** {GRID_HEIGHT_UNIT}mm
         - **Limite A1 Mini:** {A1_MINI_MAX_UNITS}x{A1_MINI_MAX_UNITS} = {A1_MINI_MAX_UNITS * GRID_UNIT:.0f}mm
         """)
+        
+        # Status do sistema
+        st.divider()
+        st.header("📦 Status do Sistema")
+        st.success("✅ Sistema Gridfinity Standalone - Sem dependências externas")
     
     # Tabs principais
     tab_baseplate, tab_bins, tab_help = st.tabs(["🔲 Baseplate", "📦 Bins (Caixas)", "❓ Ajuda"])
@@ -252,6 +257,15 @@ def main():
         # Botão de geração
         st.divider()
         
+        # Info sobre sistema Dovetail
+        if needs_tiling and optimize_a1_mini:
+            st.markdown("""
+            <div class="info-box">
+                <strong>🔗 Sistema de Encaixe Dovetail:</strong><br>
+                As peças serão geradas com encaixes tipo "rabo de andorinha" integrados.
+                Basta imprimir e encaixar - sem clipes extras necessários!
+            </div>
+            """, unsafe_allow_html=True)
         
         if st.button("🔧 Gerar Baseplate", key="gen_baseplate", type="primary"):
             with st.spinner("Gerando geometria 3D... Isso pode levar alguns segundos."):
@@ -298,6 +312,16 @@ def main():
                                 mime="application/octet-stream",
                                 help="Todas as peças em um único arquivo"
                             )
+                            
+                            # STEP Download (para CAD)
+                            step_bytes = export_to_step_bytes(compound)
+                            st.download_button(
+                                label="⬇️ Download STEP (Para SolidWorks)",
+                                data=step_bytes,
+                                file_name="baseplate_full_set.step",
+                                mime="application/octet-stream",
+                                key="dl_step_multi"
+                            )
                     else:
                         # Peça única - download direto
                         stl_bytes = export_to_stl_bytes(compound)
@@ -308,6 +332,16 @@ def main():
                             data=stl_bytes,
                             file_name="baseplate.stl",
                             mime="application/octet-stream"
+                        )
+                        
+                        # STEP Download (para CAD)
+                        step_bytes = export_to_step_bytes(compound)
+                        st.download_button(
+                            label="⬇️ Download STEP (Para SolidWorks)",
+                            data=step_bytes,
+                            file_name="baseplate.step",
+                            mime="application/octet-stream",
+                            key="dl_step_single"
                         )
                 except Exception as e:
                     st.error(f"❌ Erro ao gerar baseplate: {str(e)}")
@@ -424,6 +458,16 @@ def main():
                         data=stl_bytes,
                         file_name=filename,
                         mime="application/octet-stream"
+                    )
+                    
+                    # STEP Download (para CAD)
+                    step_bytes = export_to_step_bytes(bin_part)
+                    st.download_button(
+                        label="⬇️ Download STEP (Para SolidWorks)",
+                        data=step_bytes,
+                        file_name=filename.replace(".stl", ".step"),
+                        mime="application/octet-stream",
+                        key="dl_step_bin"
                     )
                 except Exception as e:
                     st.error(f"❌ Erro ao gerar bin: {str(e)}")

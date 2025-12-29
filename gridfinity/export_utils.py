@@ -7,7 +7,7 @@ import zipfile
 import tempfile
 import os
 from typing import List, Tuple, Optional
-from build123d import Compound, Part, export_stl
+from build123d import Compound, Part, export_stl, export_step
 
 
 def export_to_stl_bytes(shape: Compound | Part, tolerance: float = 0.001) -> bytes:
@@ -26,6 +26,28 @@ def export_to_stl_bytes(shape: Compound | Part, tolerance: float = 0.001) -> byt
     
     try:
         export_stl(shape, tmp_path, tolerance=tolerance)
+        with open(tmp_path, 'rb') as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def export_to_step_bytes(shape: Compound | Part) -> bytes:
+    """
+    Exporta um shape para bytes STEP (ISO 10303-21).
+    
+    Args:
+        shape: Objeto Compound ou Part do build123d
+        
+    Returns:
+        Bytes do arquivo STEP
+    """
+    with tempfile.NamedTemporaryFile(suffix='.step', delete=False) as tmp:
+        tmp_path = tmp.name
+    
+    try:
+        export_step(shape, tmp_path)
         with open(tmp_path, 'rb') as f:
             return f.read()
     finally:
