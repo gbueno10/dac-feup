@@ -3,4 +3,4 @@ __pycache__/
 *.jpg
 *.png
 *.stl
-*.scad
+custom_*.scad
